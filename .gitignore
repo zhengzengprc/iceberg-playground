@@ -1,0 +1,11 @@
+.idea
+*.iml
+logs/
+target/
+.DS_Store
+*.class
+classes
+metastore_db/
+spark-warehouse/
+*.log
+src/main/resources/META-INF/
