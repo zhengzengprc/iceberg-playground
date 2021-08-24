@@ -1,4 +1,9 @@
+import static org.apache.iceberg.expressions.Expressions.hour;
+import static org.apache.iceberg.expressions.Expressions.month;
 import static org.apache.spark.sql.functions.lit;
+
+import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.UpdateSchema;
 import org.apache.iceberg.hadoop.HadoopTables;
@@ -9,6 +14,8 @@ import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
+import org.apache.spark.sql.types.StringType;
+import org.apache.spark.sql.types.StructType;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -73,7 +80,7 @@ public class IcebergIngestionTest {
         // Update Existing Schema
         Arrays.stream(df2.schema().fields())
                 .filter(x -> !table.schema().columns().stream().anyMatch(y -> x.name().equals(y.name())))
-                .forEach(z -> updateSchema.addColumn(z.name(), new Types.StringType()));
+                .forEach(z -> updateSchema.addColumn(z.name(), Types.StringType.get()));
         updateSchema.commit();
 
         // In Dataframe add new column
@@ -143,7 +150,7 @@ public class IcebergIngestionTest {
         // Update Existing Schema
         Arrays.stream(df2.schema().fields())
                 .filter(x -> !table.schema().columns().stream().anyMatch(y -> x.name().equals(y.name())))
-                .forEach(z -> updateSchema.addColumn(z.name(), new Types.StringType()));
+                .forEach(z -> updateSchema.addColumn(z.name(), Types.StringType.get()));
         updateSchema.commit();
 
         // In Dataframe add new column
@@ -163,6 +170,53 @@ public class IcebergIngestionTest {
         assertEquals(4, df2.count());
     }
 
+    @Test
+    public void testIcebergReadFromCSVWithAllStingTypeSuccessful() {
+        final String targetDBName = "local.db.individualdatatype";
+        final String path = TEST_FILE_DIR_PATH + "/individual_data_type.csv";
+        final String hadoopTablePath = "spark-warehouse/db/individualdatatype";
+        Dataset<Row> df = spark.read()
+                .option("header", "true")
+                .csv(path);
+
+        df.writeTo(targetDBName).createOrReplace();
+        df = spark.table(targetDBName);
+        assertEquals(2, df.count());
+
+        // Verify all types are string types
+        StructType schema = df.schema();
+        Arrays.stream(schema.fields()).forEach(f -> assertTrue(f.dataType() instanceof StringType));
+        df.show();
+
+        Table table = loadHadoopTable(hadoopTablePath);
+        table.schema().columns().forEach(c -> assertTrue(c.type() instanceof Types.StringType));
+    }
+
+    @Test
+    public void testIcebergReadFromCSVWithPartitionByDateSuccessful() throws NoSuchTableException {
+        final String targetDBName = "spark-warehouse/db/testpartitiontype";
+        Schema schema = new Schema(
+                Types.NestedField.required(1, "level", Types.StringType.get()),
+                Types.NestedField.required(2, "event_time", Types.TimestampType.withZone(), "EventType"),
+                //Types.NestedField.required(2, "event_time", Types.StringType.get()),
+                Types.NestedField.required(3, "message", Types.StringType.get()),
+                Types.NestedField.optional(4, "call_stack", Types.ListType.ofRequired(5, Types.StringType.get()))
+        );
+
+        PartitionSpec spec = PartitionSpec.builderFor(schema)
+                .hour("event_time")
+                //.identity("level")
+                .build();
+
+        Table table = createOrReplaceHadoopTable(schema, spec, targetDBName);
+
+        // Update Partition Spec
+        table.updateSpec()
+                .addField(month("event_time"))
+                .removeField(hour("event_time"))
+                .commit();
+    }
+
     static private SparkConf getSparkConfig() {
         SparkConf config = new SparkConf();
         config.set("spark.sql.legacy.createHiveTableByDefault", "false");
@@ -176,5 +230,11 @@ public class IcebergIngestionTest {
     private Table loadHadoopTable(String location) {
         HadoopTables tables = new HadoopTables(spark.sparkContext().hadoopConfiguration());
         return tables.load(location);
+    }
+
+    private Table createOrReplaceHadoopTable(Schema schema, PartitionSpec spec, String tableIdentifier) {
+        HadoopTables tables = new HadoopTables(spark.sparkContext().hadoopConfiguration());
+        tables.dropTable(tableIdentifier);
+        return tables.create(schema, spec, tableIdentifier);
     }
 }

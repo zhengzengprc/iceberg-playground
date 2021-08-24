@@ -1,0 +1,2 @@
+{"firstName":"David", "lastName":"Cooker", "age":17, "address":{"streetNo":"123", "cityName":"Redmond", "zipCode":98052, "country":"U.S.A"}}
+{"firstName":"Kate", "lastName":"Lucy", "age":27, "address":{"streetNo":"456", "cityName":"Bellevue", "zipCode":98004, "country":"U.S.A"}}
