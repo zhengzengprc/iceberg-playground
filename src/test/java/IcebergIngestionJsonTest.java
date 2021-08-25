@@ -86,6 +86,11 @@ public class IcebergIngestionJsonTest {
         df2.printSchema();
         df2.show();
         assertEquals(5, df2.count());
+
+        // Filter out the entries in the struct type
+        df2.filter("address.cityName=\"Redmond\"").show();
+        Dataset<Row> df3 = spark.sql("select * from local.db.individualnewfieldjson where address.cityName=\"Bellevue\"");
+        df3.show();
     }
 
     @Test
