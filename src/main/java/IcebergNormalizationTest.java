@@ -6,8 +6,16 @@ import org.apache.iceberg.types.Types;
 import org.apache.logging.log4j.simple.SimpleLogger;
 import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.sql.ForeachWriter;
+import org.apache.spark.sql.streaming.StreamingQuery;
+import org.apache.spark.sql.streaming.StreamingQueryException;
 import org.apache.spark.sql.streaming.Trigger;
-import org.junit.*;
+import org.junit.Before;
+import org.junit.BeforeClass;
+import org.junit.AfterClass;
+import org.junit.Test;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import org.apache.iceberg.*;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -15,6 +23,7 @@ import org.apache.spark.sql.SparkSession;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
+import javax.validation.constraints.AssertTrue;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -57,13 +66,17 @@ public class IcebergNormalizationTest {
     private static final String SILVER_SQL_TABLE1 = CATALOG + "." + SILVER_NAMESPACE + "." + SILVER_TABLE_NAME1;
     private static final String SILVER_SQL_TABLE2 = CATALOG + "." + SILVER_NAMESPACE + "." + SILVER_TABLE_NAME2;
     private static final String SILVER_TABLE_PATH1 = WAREHOUSE + "." + SILVER_SQL_TABLE1;
-    private static final String SILVER_TALBE_PATH2 = WAREHOUSE + "." + SILVER_SQL_TABLE2;
+    private static final String SILVER_TABLE_PATH2 = WAREHOUSE + "." + SILVER_SQL_TABLE2;
 
     private static Dataset<Row> bronzeSourceStreamDf;
+    private static Dataset<Row> silverSinkStreamDf1;
+
+    private static StreamingQuery query;
 
     /*
     Create source Bronze table.
-    Create skeleton Silver tables.
+    Create sink Silver tables.
+    Create streaming job.
      */
     @BeforeClass
     public static void setup() {
@@ -71,6 +84,55 @@ public class IcebergNormalizationTest {
         setSparkSession();
         createBronzeTable();
         createSilverTables();
+
+        bronzeSourceStreamDf = spark.readStream()
+                .format("iceberg")
+                .table(BRONZE_SQL_TABLE);
+
+        assertTrue(bronzeSourceStreamDf.isStreaming());
+
+        silverSinkStreamDf1 = bronzeSourceStreamDf.select("id", "firstName", "lastName");
+
+
+//        var writer = new ForeachWriter<Row>() {
+//            @Override
+//            public boolean open(long partitionId, long epochId) {
+//                return true;
+//            }
+//
+//            @Override
+//            public void process(Row value) {
+//
+//            }
+//
+//            @Override
+//            public void close(Throwable errorOrNull) {
+//
+//            }
+//        }
+
+        try {
+            query = silverSinkStreamDf1.writeStream()
+//                    .foreach()
+                    .format("iceberg")
+                    .outputMode("append")
+//                    .option("path", SILVER_SQL_TABLE1)
+                    .trigger(Trigger.ProcessingTime(1, TimeUnit.MILLISECONDS))
+                    .option("checkpointLocation", SILVER_TABLE_NAME1 + "_checkpoint")
+                    .toTable(SILVER_SQL_TABLE1);
+        } catch (TimeoutException e) {
+            System.out.println("PRINTING OUT ERROR STACK TRACE-----------------------------------------");
+            e.printStackTrace();
+            System.out.println("PRINTING OUT ERROR STACK TRACE-----------------------------------------");
+            tearDown();
+        }
+    }
+
+    /*
+    For-each row processing function
+     */
+    public void processRow(Dataset<String> dataset, Long batchId) {
+
     }
 
 
@@ -79,16 +141,24 @@ public class IcebergNormalizationTest {
      */
     @AfterClass
     public static void tearDown() {
+        try {
+            query.stop();
+        } catch (TimeoutException e) {
+            e.printStackTrace();
+        }
         bronzeCatalog.dropTable(bronzeTableId);
         silverCatalog1.dropTable(silverTableId1);
         silverCatalog2.dropTable(silverTableId2);
+        spark.sql("DROP TABLE IF EXISTS " + BRONZE_SQL_TABLE);
+        spark.sql("DROP TABLE IF EXISTS " + SILVER_SQL_TABLE1);
+        spark.sql("DROP TABLE IF EXISTS " + SILVER_SQL_TABLE2);
     }
 
     private static void setSparkSession() {
         spark = SparkSession
                 .builder()
                 .appName("Denormalization Example")
-                .master("local")
+                .master(CATALOG)
                 .config(sparkConf)
                 .getOrCreate();
         sparkContext = new JavaSparkContext(spark.sparkContext());
@@ -101,7 +171,7 @@ public class IcebergNormalizationTest {
 //        sparkConf.set("spark.master", CATALOG);
 
         // spark catalog: for non-iceberg tables
-//        sparkConf.set("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions");
+//        sparkConf.set("spark.sql.extensions", "org.apache.initialceberg.spark.extensions.IcebergSparkSessionExtensions");
 //        sparkConf.set("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog");
 //        sparkConf.set("spark.sql.catalog.spark_catalog.type", "hive");
 
@@ -109,17 +179,6 @@ public class IcebergNormalizationTest {
         sparkConf.set("spark.sql.catalog." + CATALOG, "org.apache.iceberg.spark.SparkCatalog");
         sparkConf.set("spark.sql.catalog." + CATALOG + ".type", "hadoop");
         sparkConf.set("spark.sql.catalog." + CATALOG + ".warehouse", WAREHOUSE);
-    }
-
-    private static void createSparkBronzeTable() {
-        bronzeSparkDataset = spark.sql("CREATE TABLE IF NOT EXISTS " + BRONZE_SQL_TABLE +
-                "(id bigint, firstName string, lastName string," +
-                "streetNo1 int, cityName1 string, zipcode1 int, county1 string," +
-                "streetNo2 int, cityName2 string, zipcode2 int, county2 string, arrivalTime timestamp) " +
-                "USING iceberg");
-        bronzeSparkDataset = spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-                "(1, \'abc\', \'bcd\', 123, \'redmond\', 98022, \'usa\', 343, \'bellevue\', 98077, \'usa\', current_timestamp())," +
-                "(2, \'some\', \'one\', 444, \'seattle\', 98008, \'usa\', NULL, NULL, NULL, NULL, current_timestamp())");
     }
 
     private static void createBronzeTable() {
@@ -140,7 +199,6 @@ public class IcebergNormalizationTest {
 
         PartitionSpec bronzeSpec = PartitionSpec.builderFor(bronzeSchema)
                 .bucket("id",10)
-                .bucket("arrivalTime", 10)
                 .build();
 
         // Catalog method of creating Iceberg table
@@ -148,32 +206,14 @@ public class IcebergNormalizationTest {
         bronzeTableId = TableIdentifier.of(BRONZE_NAMESPACE, BRONZE_TABLE_NAME);
         bronzeTable = bronzeCatalog.createTable(bronzeTableId, bronzeSchema, bronzeSpec);
 
-        createSparkBronzeTable();
-
-        bronzeSourceStreamDf = spark.readStream()
-                .format("iceberg")
-                .option("path", BRONZE_SQL_TABLE)
-                .load();
+        bronzeSparkDataset = spark.sql("CREATE TABLE IF NOT EXISTS " + BRONZE_SQL_TABLE +
+                "(id bigint, firstName string, lastName string," +
+                "streetNo1 int, cityName1 string, zipcode1 int, county1 string," +
+                "streetNo2 int, cityName2 string, zipcode2 int, county2 string, arrivalTime timestamp) " +
+                "USING iceberg");
 
 //         Table interface method of creating Iceberg table
 //        bronzeTable = new HadoopTables().create(bronzeSchema, BRONZE_NAMESPACE + "." + BRONZE_TABLE_NAME);
-    }
-
-    private static void createSparkSilverTables() {
-        silverSparkDataset1 = spark.sql("CREATE TABLE IF NOT EXISTS " + SILVER_SQL_TABLE1 +
-                "(id bigint, firstName string, lastName string) " +
-                "USING iceberg");
-        silverSparkDataset1 = spark.sql("INSERT INTO " + SILVER_SQL_TABLE1 + " VALUES " +
-                "(1, \'abc\', \'bcd\')," +
-                "(2, \'some\', \'one\')");
-
-        silverSparkDataset2 = spark.sql("CREATE TABLE IF NOT EXISTS " + SILVER_SQL_TABLE2 +
-                "(AddressId bigint, PartyId bigint, " +
-                "streetNo int, cityName string, zipcode int, county string) " +
-                "USING iceberg");
-        silverSparkDataset2 = spark.sql("INSERT INTO " + SILVER_SQL_TABLE2 + " VALUES " +
-                "(1, 1, 123, \'redmond\', 98022, \'usa\'), (2, 1, 343, \'bellevue\', 98077, \'usa\')," +
-                "(2, 1, 444, \'seattle\', 98008, \'usa\')");
     }
 
     private static void createSilverTables() {
@@ -188,10 +228,10 @@ public class IcebergNormalizationTest {
         Schema silverSchema2 = new Schema(
                 Types.NestedField.required(1, "AddressId", Types.IntegerType.get()),
                 Types.NestedField.required(2, "PartyId", Types.IntegerType.get()),
-                Types.NestedField.optional(4, "streetNo", Types.IntegerType.get()),
-                Types.NestedField.optional(5, "cityName", Types.StringType.get()),
-                Types.NestedField.optional(6, "zipcode", Types.IntegerType.get()),
-                Types.NestedField.optional(7, "county", Types.StringType.get())
+                Types.NestedField.optional(3, "streetNo", Types.IntegerType.get()),
+                Types.NestedField.optional(4, "cityName", Types.StringType.get()),
+                Types.NestedField.optional(5, "zipcode", Types.IntegerType.get()),
+                Types.NestedField.optional(6, "county", Types.StringType.get())
         );
 
         PartitionSpec silverSpec1 = PartitionSpec.builderFor(silverSchema1)
@@ -211,22 +251,14 @@ public class IcebergNormalizationTest {
         silverTableId2 = TableIdentifier.of(SILVER_NAMESPACE, SILVER_TABLE_NAME2);
         silverTable2 = silverCatalog2.createTable(silverTableId2, silverSchema2, silverSpec2);
 
-        createSparkSilverTables();
+        silverSparkDataset1 = spark.sql("CREATE TABLE IF NOT EXISTS " + SILVER_SQL_TABLE1 +
+                "(id bigint, firstName string, lastName string) " +
+                "USING iceberg");
 
-        Dataset<Row> silverSinkStreamDf1 = ;
-        Dataset<Row> silverSinkStreamDf2 = ;
-
-        try {
-            bronzeSourceStreamDf.writeStream()
-                    .format("iceberg")
-                    .outputMode("append")
-                    .trigger(Trigger.ProcessingTime(1, TimeUnit.SECONDS))
-                    .option("path", BRONZE_SQL_TABLE_SINK)
-                    .option("checkpointLocation", BRONZE_SQL_TABLE_SINK_CHECKPT)
-                    .start();
-        } catch (TimeoutException e) {
-            e.printStackTrace();
-        }
+        silverSparkDataset2 = spark.sql("CREATE TABLE IF NOT EXISTS " + SILVER_SQL_TABLE2 +
+                "(AddressId bigint, PartyId bigint, " +
+                "streetNo int, cityName string, zipcode int, county string) " +
+                "USING iceberg");
 
     }
 
@@ -235,114 +267,19 @@ public class IcebergNormalizationTest {
      */
 
     @Test
-    /*
-    Given:
-        - schemas of the bronze and silver tables
-        - state of bronze table before and after change(s)
-        - mapping between bronze and silver columns
-    Determine
-        - the change(s) that occurred
-    Then, reflect those changes in the silver tables.
-     */
     public void addEntireRecordTest() {
+        bronzeSparkDataset = spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
+                "(1, \'abc\', \'bcd\', 123, \'redmond\', 98022, \'usa\', 343, \'bellevue\', 98077, \'usa\', current_timestamp())," +
+                "(2, \'some\', \'one\', 444, \'seattle\', 98008, \'usa\', NULL, NULL, NULL, NULL, current_timestamp())");
+
+        spark.read().table(SILVER_SQL_TABLE1).show();
+
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
                 "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\', current_timestamp())");
 
-        spark.sql("SELECT * FROM " + BRONZE_SQL_TABLE_SINK).show();
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//        bronzeSparkDataset.sort(col("arrivalTime").desc()).show();
-
-
-        // We detect that a new record has been added by checking if Id 3 is new
-        // We then know to add a new record to Indiv. table + CPA table according to mappings (assume schema is static)
-
+        spark.read().table(SILVER_SQL_TABLE1).show();
     }
 
-
-//    public void addAddressAttributeTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//    }
-//
-//    public void deleteAddressAttributeForSomeAddressesTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//    }
-//
-//    public void deleteAddressAttriuteForAllAddressesTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//    }
-//
-//    public void addEntireAddressRecordTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//    }
-//
-//    public void deleteEntireAddressRecordTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//    }
-//
-//    public void addIndividualAttributeTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//    }
-//
-//    public void deleteIndividualAttributeTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//    }
-//
-//    public void addEntireIndividualRecordTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//    }
-//
-//    public void deleteEntireIndividualRecordTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//    }
-//
-//    public void deleteEntireRecordTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);return;
-//    }
-//
-//    public void updateIndividualRecordTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//    }
-//
-//    public void updateAddressRecordTest() {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\')");
-//        System.out.println("bronze table after whole record insertion");
-//        bronzeSparkDataset = spark.read().format("iceberg").load(BRONZE_SQL_TABLE);
-//    }
-
 }
+
 
