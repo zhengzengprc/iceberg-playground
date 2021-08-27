@@ -24,10 +24,11 @@ import org.junit.runners.JUnit4;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /*
 Create initial source Bronze table.
@@ -66,6 +67,10 @@ public class IcebergNormalizationTest {
 
     private static Dataset<Row> bronzeSourceStreamDf;
     private static Dataset<Row> silverSinkStreamDf1;
+    private static Dataset<Row> silverSinkStreamDf2_1;
+
+    private static Map<String, String> bronzeToSilver1SchemaMap;
+    private static List<Map<String, String>> bronzeToSilver2SchemaMap;
 
     private static StreamingQuery query;
 
@@ -80,6 +85,7 @@ public class IcebergNormalizationTest {
         setSparkSession();
         createBronzeTable();
         createSilverTables();
+        setupSchemaMappings();
 
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
                 "(1, \'abc\', \'bcd\', 123, \'redmond\', 98022, \'usa\', 343, \'bellevue\', 98077, \'usa\', current_timestamp())," +
@@ -90,16 +96,11 @@ public class IcebergNormalizationTest {
                 .format("iceberg")
                 .table(BRONZE_SQL_TABLE);
 
-        silverSinkStreamDf1 = bronzeSourceStreamDf.select("id", "firstName", "lastName");
+        silverSinkStreamDf1 = bronzeSourceStreamDf.select();
 
         assertTrue(silverSinkStreamDf1.isStreaming());
 
         try {
-//            query = silverSinkStreamDf1.writeStream()
-//                    .format("console")
-//                    .outputMode("append")
-//                    .start();
-
             query = silverSinkStreamDf1.writeStream()
                     .format("iceberg")
                     .outputMode("append")
@@ -110,7 +111,6 @@ public class IcebergNormalizationTest {
 
             Thread.sleep(2000);
             assertTrue(query.isActive());
-//            query.stop();
         } catch (TimeoutException | InterruptedException e) {
             e.printStackTrace();
             tearDown();
@@ -133,10 +133,37 @@ public class IcebergNormalizationTest {
         // delete checkpts
         try {
             FileUtils.deleteDirectory(FileUtils.getFile(WAREHOUSE));
-            FileUtils.deleteDirectory(FileUtils.getFile(SILVER_TABLE_NAME1 + "_checkpoint"));
+            FileUtils.deleteDirectory(FileUtils.getFile(SILVER_TABLE_NAME1 + "_checkpoint")); // TODO: add more folders here as relevant
         } catch (IOException e) {
             e.printStackTrace();
         }
+    }
+
+    private static void setupSchemaMappings() {
+        bronzeToSilver1SchemaMap = Stream.of(new String [][] {
+                {"id", "id"},
+                {"firstName", "firstName"},
+                {"lastName", "lastName"},
+        }).collect(Collectors.toMap(data -> data[0], data -> data[1]));
+
+        Map<String, String> idMap = Stream.of(new String [][] {
+                {"id", "PartyId"},
+        }).collect(Collectors.toMap(data -> data[0], data -> data[1]));
+
+        Map<String, String> address1Map = Stream.of(new String [][] {
+                {"streetNo1", "streetNo"},
+                {"cityName1", "cityName"},
+                {"zipcode1", "zipcode"},
+                {"county1", "county"}
+        }).collect(Collectors.toMap(data -> data[0], data -> data[1]));
+
+        Map<String, String> address2Map = Stream.of(new String [][] {
+                {"streetNo2", "streetNo"},
+                {"cityName2", "cityName"},
+                {"zipcode2", "zipcode"},
+                {"county2", "county"}
+        }).collect(Collectors.toMap(data -> data[0], data -> data[1]));
+        bronzeToSilver2SchemaMap = List.of(idMap, address1Map, address2Map);
     }
 
     private static void setSparkSession() {
