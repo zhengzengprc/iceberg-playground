@@ -1,8 +1,6 @@
 import org.apache.commons.io.FileUtils;
-import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
-import org.apache.iceberg.hadoop.HadoopCatalog;
 import org.apache.iceberg.hadoop.HadoopTables;
 import org.apache.iceberg.types.Types;
 import org.apache.spark.SparkConf;
@@ -12,23 +10,24 @@ import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.streaming.StreamingQueryException;
 import org.apache.spark.sql.streaming.Trigger;
-import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.AfterClass;
 import org.junit.Test;
+
+import static org.apache.spark.sql.functions.col;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertFalse;
 import org.apache.iceberg.*;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-import java.io.File;
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import scala.collection.JavaConverters;
+import scala.collection.Seq;
 
 /*
 Create initial source Bronze table.
@@ -74,6 +73,9 @@ public class IcebergNormalizationTest {
 
     private static StreamingQuery query;
 
+    private static ForeachWriter<Row> silver1Writer;
+    private static String silver1WriteMode = "append"; // append, complete, update
+
     /*
     Create source Bronze table.
     Create sink Silver tables.
@@ -86,28 +88,36 @@ public class IcebergNormalizationTest {
         createBronzeTable();
         createSilverTables();
         setupSchemaMappings();
+        setupWriters();
 
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
                 "(1, \'abc\', \'bcd\', 123, \'redmond\', 98022, \'usa\', 343, \'bellevue\', 98077, \'usa\', current_timestamp())," +
                 "(2, \'some\', \'one\', 444, \'seattle\', 98008, \'usa\', NULL, NULL, NULL, NULL, current_timestamp())");
 
-        spark.table(BRONZE_SQL_TABLE).show();
+//        spark.table(BRONZE_SQL_TABLE).show();
         bronzeSourceStreamDf = spark.readStream()
                 .format("iceberg")
                 .table(BRONZE_SQL_TABLE);
 
-        silverSinkStreamDf1 = bronzeSourceStreamDf.select();
+        List<String> bronzeSilver1Cols = new ArrayList<String>(bronzeToSilver1SchemaMap.keySet());
+        silverSinkStreamDf1 = bronzeSourceStreamDf.select(convertListToSeq(bronzeSilver1Cols)); // String col, Seq<String> cols
 
         assertTrue(silverSinkStreamDf1.isStreaming());
 
         try {
             query = silverSinkStreamDf1.writeStream()
+//                    .trigger(Trigger.Continuous(1000))
+                    .foreach(silver1Writer) // may need modify to match Xiang's, group by record Id's, max cap on the batch
+                    // use merge into semantics
+                    // batch == all records with same id
+                    // merge set of rows into silver
+                    // batch may be too big so see max batch size
+                    // silver table will have record version
                     .format("iceberg")
-                    .outputMode("append")
+                    .outputMode(silver1WriteMode)
                     .option("path", SILVER_SQL_TABLE1)
                     .option("checkpointLocation", SILVER_TABLE_NAME1 + "_checkpoint")
                     .start();
-
 
             Thread.sleep(2000);
             assertTrue(query.isActive());
@@ -139,31 +149,52 @@ public class IcebergNormalizationTest {
         }
     }
 
+    private static void setupWriters() {
+        silver1Writer = new ForeachWriter<Row>() {
+            @Override
+            public boolean open(long partitionId, long epochId) {
+                return true;
+            }
+
+            @Override
+            public void process(Row value) { // TODO make more generic (i.e. using schema maps)
+                String id = value.getAs("id").toString();
+                spark.table(BRONZE_SQL_TABLE).show();
+                boolean idNotInSilver1 = spark.sql("SELECT * FROM " + SILVER_TABLE_NAME1 + " WHERE id = " + id).isEmpty();
+                if (idNotInSilver1) {
+                    silver1WriteMode = "append"; // something along these lines
+                } else {
+                    silver1WriteMode = "update"; // something along these lines
+                }
+                System.out.println(silver1WriteMode);
+            }
+
+            @Override
+            public void close(Throwable errorOrNull) {} // do nothing
+        };
+    }
+
     private static void setupSchemaMappings() {
-        bronzeToSilver1SchemaMap = Stream.of(new String [][] {
-                {"id", "id"},
-                {"firstName", "firstName"},
-                {"lastName", "lastName"},
-        }).collect(Collectors.toMap(data -> data[0], data -> data[1]));
+        bronzeToSilver1SchemaMap = new LinkedHashMap<>();
+        bronzeToSilver1SchemaMap.put("id", "id");
+        bronzeToSilver1SchemaMap.put("firstName", "firstName");
+        bronzeToSilver1SchemaMap.put("lastName", "lastName");
 
-        Map<String, String> idMap = Stream.of(new String [][] {
-                {"id", "PartyId"},
-        }).collect(Collectors.toMap(data -> data[0], data -> data[1]));
+        Map<String, String> idMap = new LinkedHashMap<>();
+        idMap.put("id", "PartyId");
 
-        Map<String, String> address1Map = Stream.of(new String [][] {
-                {"streetNo1", "streetNo"},
-                {"cityName1", "cityName"},
-                {"zipcode1", "zipcode"},
-                {"county1", "county"}
-        }).collect(Collectors.toMap(data -> data[0], data -> data[1]));
+        Map<String, String> address1Map = new LinkedHashMap<>();
+        address1Map.put("streetNo1", "streetNo");
+        address1Map.put("cityName1", "cityName");
+        address1Map.put("zipcode1", "zipcode");
+        address1Map.put("county1", "county");
 
-        Map<String, String> address2Map = Stream.of(new String [][] {
-                {"streetNo2", "streetNo"},
-                {"cityName2", "cityName"},
-                {"zipcode2", "zipcode"},
-                {"county2", "county"}
-        }).collect(Collectors.toMap(data -> data[0], data -> data[1]));
-        bronzeToSilver2SchemaMap = List.of(idMap, address1Map, address2Map);
+        Map<String, String> address2Map = new LinkedHashMap<>();
+        address2Map.put("streetNo2", "streetNo");
+        address2Map.put("cityName2", "cityName");
+        address2Map.put("zipcode2", "zipcode");
+        address2Map.put("county2", "county");
+        bronzeToSilver2SchemaMap = List.of(idMap, address1Map, address2Map); // TODO write id generation logic in quip
     }
 
     private static void setSparkSession() {
@@ -259,6 +290,11 @@ public class IcebergNormalizationTest {
         HadoopTables tables = new HadoopTables(spark.sparkContext().hadoopConfiguration());
         tables.dropTable(tableIdentifier);
         return tables.create(schema, spec, properties, tableIdentifier);
+    }
+
+    public static Seq<Column> convertListToSeq(List<String> inputList) {
+        List<Column> inputListCols = inputList.stream().map(colName -> col(colName)).collect(Collectors.toList());
+        return JavaConverters.asScalaIteratorConverter(inputListCols.iterator()).asScala().toSeq();
     }
 
     /*
