@@ -11,6 +11,7 @@ import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.streaming.OutputMode;
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.streaming.Trigger;
+import org.junit.After;
 import org.junit.BeforeClass;
 import org.junit.AfterClass;
 import org.junit.Test;
@@ -98,7 +99,8 @@ public class IcebergNormalizationTest {
                 .load(BRONZE_SQL_TABLE);
 
         System.out.println(BRONZE_SQL_TABLE + " BEGINNING");
-        spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
+        bronzeSparkDataset =  spark.read().format("iceberg").table(BRONZE_SQL_TABLE);
+        bronzeSparkDataset.show();
         /*
         local.bronze_namespace.bronze_table
         +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
@@ -398,14 +400,13 @@ public class IcebergNormalizationTest {
 
         /*
         local.bronze_namespace.bronze_table
-        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
-        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|    cityName2|zipcode2|county2|         arrivalTime|recordVersion|
-        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
-        |  2|     some|    body|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 12:51:...|            2| <--
-        |  3|       no|     one|      456|   boston|   90578|    usa|      888|san francisco|   99999|    usa|2021-08-31 12:50:...|            1|
-        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343|     bellevue|   98077|    usa|2021-08-31 12:50:...|            1|
-        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 12:50:...|            1|
-        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
+        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|cityName2|zipcode2|county2|         arrivalTime|recordVersion|
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
+        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343| bellevue|   98077|    usa|2021-08-31 13:46:...|            1|
+        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 13:46:...|            1|
+        |  2|     some|    body|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 13:46:...|            2| <--
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
          */
 
         System.out.println(SILVER_SQL_TABLE1 + " AFTER EXISTING RECORD UPDATE");
@@ -416,7 +417,6 @@ public class IcebergNormalizationTest {
         | id|firstName|lastName|recordVersion|
         +---+---------+--------+-------------+
         |  2|     some|    body|            2| <--
-        |  3|       no|     one|            1|
         |  1|      abc|     bcd|            1|
         +---+---------+--------+-------------+
          */
@@ -439,15 +439,13 @@ public class IcebergNormalizationTest {
 
         /*
         local.bronze_namespace.bronze_table
-        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
-        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|    cityName2|zipcode2|county2|         arrivalTime|recordVersion|
-        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
-        |  2|     some|    body|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 13:04:...|            2|
-        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 13:04:...|            1|<--
-        |  3|       no|     one|      456|   boston|   90578|    usa|      888|san francisco|   99999|    usa|2021-08-31 13:04:...|            1|
-        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343|     bellevue|   98077|    usa|2021-08-31 13:03:...|            1|
-        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 13:03:...|            1|
-        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
+        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|cityName2|zipcode2|county2|         arrivalTime|recordVersion|
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
+        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 13:48:...|            1|
+        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343| bellevue|   98077|    usa|2021-08-31 13:48:...|            1|
+        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 13:48:...|            1| <--
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
          */
 
         System.out.println(SILVER_SQL_TABLE1 + " AFTER EXISTING RECORD \"UPDATE\"");
@@ -457,9 +455,8 @@ public class IcebergNormalizationTest {
         +---+---------+--------+-------------+
         | id|firstName|lastName|recordVersion|
         +---+---------+--------+-------------+
-        |  3|       no|     one|            1|
-        |  2|     some|    body|            2|
         |  1|      abc|     bcd|            1|
+        |  2|     some|     one|            1| <-- NO CHANGE
         +---+---------+--------+-------------+
          */
     }
