@@ -204,10 +204,6 @@ public class IcebergNormalizationTest {
                             "UPDATE SET * " +
                         "WHEN NOT MATCHED THEN " +
                             "INSERT *";
-//                updatesSpark.sql("SELECT * FROM updates").show();
-//                System.out.println(latestRecordVersionSql + laterRecordVersionThanTargetSql);
-//                SparkSession updatesSpark = SparkSession.builder().config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions").getOrCreate();
-//                SparkSession updatesSpark = SparkSession.builder().config(getSparkConf()).getOrCreate();
                 rowDataset.sparkSession().sql(mergeSql);
                 spark.sql("REFRESH TABLE " + SILVER_SQL_TABLE1);
             }
