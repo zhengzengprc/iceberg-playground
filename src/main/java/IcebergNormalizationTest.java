@@ -97,6 +97,29 @@ public class IcebergNormalizationTest {
                 .format("iceberg")
                 .load(BRONZE_SQL_TABLE);
 
+        System.out.println(BRONZE_SQL_TABLE + " BEGINNING");
+        spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
+        /*
+        local.bronze_namespace.bronze_table
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
+        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|cityName2|zipcode2|county2|         arrivalTime|recordVersion|
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
+        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343| bellevue|   98077|    usa|2021-08-31 11:19:...|            1|
+        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 11:19:...|            1|
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
+         */
+
+        System.out.println(SILVER_SQL_TABLE1 + " BEGINNING");
+        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
+        /*
+        local.silver_namespace.silver_table1
+        +---+---------+--------+-------------+
+        | id|firstName|lastName|recordVersion|
+        +---+---------+--------+-------------+
+        +---+---------+--------+-------------+
+         */
+
+
 //        List<String> bronzeSilver1Cols = new ArrayList<String>(bronzeToSilver1SchemaMap.keySet());
 //        silverSinkStreamDf1 = bronzeSourceStreamDf.select(convertListToSeq(bronzeSilver1Cols)); // String col, Seq<String> cols
         silverSinkStreamDf1 = bronzeSourceStreamDf.select("id", "firstName", "lastName", "arrivalTime", "recordVersion");
@@ -107,13 +130,13 @@ public class IcebergNormalizationTest {
             query = silverSinkStreamDf1.writeStream()
                     .format("iceberg")
                     .trigger(Trigger.ProcessingTime("2 seconds")) // default trigger runs micro-batch as soon as it can
-                    .outputMode(OutputMode.Append())
+                    .outputMode("append")
 //                    .option("path", SILVER_SQL_TABLE1) // write to silver table within forEachBatch fxn
                     .option("checkpointLocation", SILVER_TABLE_NAME1 + "_checkpoint")
                     .foreachBatch(microBatchHandler)
                     .start();
             assertTrue(query.isActive());
-            Thread.sleep(4000); // make longer
+            Thread.sleep(5000); // make longer
         } catch (TimeoutException | InterruptedException e) {
             e.printStackTrace();
             tearDown();
@@ -183,8 +206,10 @@ public class IcebergNormalizationTest {
                             "INSERT *";
 //                updatesSpark.sql("SELECT * FROM updates").show();
 //                System.out.println(latestRecordVersionSql + laterRecordVersionThanTargetSql);
-                SparkSession updatesSpark = SparkSession.builder().config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions").getOrCreate();
-                updatesSpark.sql(mergeSql).show();
+//                SparkSession updatesSpark = SparkSession.builder().config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions").getOrCreate();
+//                SparkSession updatesSpark = SparkSession.builder().config(getSparkConf()).getOrCreate();
+                rowDataset.sparkSession().sql(mergeSql);
+                spark.sql("REFRESH TABLE " + SILVER_SQL_TABLE1);
             }
         };
     }
@@ -322,39 +347,17 @@ public class IcebergNormalizationTest {
 
     /*
     Scenario 1: happy path
+    Add a bronze record corresponding to new id. Silver tables should have inserts.
      */
 
     @Test
     public void addEntireRecordTest() throws InterruptedException {
-
-        System.out.println(BRONZE_SQL_TABLE);
-        spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
-        /*
-        local.bronze_namespace.bronze_table
-        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|cityName2|zipcode2|county2|         arrivalTime|recordVersion|
-        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343| bellevue|   98077|    usa|2021-08-31 11:19:...|            1|
-        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 11:19:...|            1|
-        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-         */
-
-        System.out.println(SILVER_SQL_TABLE1);
-        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
-        /*
-        local.silver_namespace.silver_table1
-        +---+---------+--------+-------------+
-        | id|firstName|lastName|recordVersion|
-        +---+---------+--------+-------------+
-        +---+---------+--------+-------------+
-         */
-
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
                 "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\', current_timestamp(), 1)");
 
-        Thread.sleep(2000);
+        Thread.sleep(10000);
 
-        System.out.println(BRONZE_SQL_TABLE);
+        System.out.println(BRONZE_SQL_TABLE + " AFTER NEW RECORD INSERT");
         spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
 
         /*
@@ -364,17 +367,103 @@ public class IcebergNormalizationTest {
         +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
         |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343|     bellevue|   98077|    usa|2021-08-31 11:19:...|            1|
         |  2|     some|     one|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 11:19:...|            1|
-        |  3|       no|     one|      456|   boston|   90578|    usa|      888|san francisco|   99999|    usa|2021-08-31 11:19:...|            1|
+        |  3|       no|     one|      456|   boston|   90578|    usa|      888|san francisco|   99999|    usa|2021-08-31 11:19:...|            1| <--
         +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
          */
 
-        System.out.println(SILVER_SQL_TABLE1);
+        System.out.println(SILVER_SQL_TABLE1 + " AFTER NEW RECORD INSERT");
         spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
         /*
         local.silver_namespace.silver_table1
         +---+---------+--------+-------------+
         | id|firstName|lastName|recordVersion|
         +---+---------+--------+-------------+
+        |  3|       no|     one|            1| <--
+        |  1|      abc|     bcd|            1|
+        |  2|     some|     one|            1|
+        +---+---------+--------+-------------+
+         */
+    }
+
+    /*
+    Scenario 2: update existing records
+    Update an existing bronze record (new recordVersion). Corresponding row(s) in silver table(s) should be updated.
+     */
+
+    @Test
+    public void updateExistingRecordTest() throws InterruptedException {
+        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
+                "(2, \'some\', \'body\', 444, \'seattle\', 98008, \'usa\', null, null, null, null, current_timestamp(), 2)");
+
+        Thread.sleep(10000);
+
+        System.out.println(BRONZE_SQL_TABLE + " AFTER EXISTING RECORD UPDATE");
+        spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
+
+        /*
+        local.bronze_namespace.bronze_table
+        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
+        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|    cityName2|zipcode2|county2|         arrivalTime|recordVersion|
+        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
+        |  2|     some|    body|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 12:51:...|            2| <--
+        |  3|       no|     one|      456|   boston|   90578|    usa|      888|san francisco|   99999|    usa|2021-08-31 12:50:...|            1|
+        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343|     bellevue|   98077|    usa|2021-08-31 12:50:...|            1|
+        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 12:50:...|            1|
+        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
+         */
+
+        System.out.println(SILVER_SQL_TABLE1 + " AFTER EXISTING RECORD UPDATE");
+        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
+        /*
+        local.silver_namespace.silver_table1
+        +---+---------+--------+-------------+
+        | id|firstName|lastName|recordVersion|
+        +---+---------+--------+-------------+
+        |  2|     some|    body|            2| <--
+        |  3|       no|     one|            1|
+        |  1|      abc|     bcd|            1|
+        +---+---------+--------+-------------+
+         */
+    }
+
+        /*
+    Scenario 3: don't update existing records
+    "Update" an existing bronze record (old recordVersion). Corresponding row(s) in silver table(s) should NOT be updated.
+     */
+
+    @Test
+    public void dontUpdateExistingRecordTest() throws InterruptedException {
+        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
+                "(2, \'some\', \'one\', 444, \'seattle\', 98008, \'usa\', null, null, null, null, current_timestamp(), 1)");
+
+        Thread.sleep(10000);
+
+        System.out.println(BRONZE_SQL_TABLE + " AFTER EXISTING RECORD \"UPDATE\"");
+        spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
+
+        /*
+        local.bronze_namespace.bronze_table
+        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
+        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|    cityName2|zipcode2|county2|         arrivalTime|recordVersion|
+        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
+        |  2|     some|    body|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 13:04:...|            2|
+        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 13:04:...|            1|<--
+        |  3|       no|     one|      456|   boston|   90578|    usa|      888|san francisco|   99999|    usa|2021-08-31 13:04:...|            1|
+        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343|     bellevue|   98077|    usa|2021-08-31 13:03:...|            1|
+        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 13:03:...|            1|
+        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
+         */
+
+        System.out.println(SILVER_SQL_TABLE1 + " AFTER EXISTING RECORD \"UPDATE\"");
+        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
+        /*
+        local.silver_namespace.silver_table1
+        +---+---------+--------+-------------+
+        | id|firstName|lastName|recordVersion|
+        +---+---------+--------+-------------+
+        |  3|       no|     one|            1|
+        |  2|     some|    body|            2|
+        |  1|      abc|     bcd|            1|
         +---+---------+--------+-------------+
          */
     }
