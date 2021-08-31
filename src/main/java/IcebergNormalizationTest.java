@@ -88,51 +88,39 @@ public class IcebergNormalizationTest {
         setSparkSession();
         createBronzeTable();
         createSilverTables();
-        setupSchemaMappings();
+//        setupSchemaMappings();
         setupMicroBatchHandler();
 
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-                "(1, \'abc\', \'bcd\', 123, \'redmond\', 98022, \'usa\', 343, \'bellevue\', 98077, \'usa\', current_timestamp())," +
-                "(2, \'some\', \'one\', 444, \'seattle\', 98008, \'usa\', NULL, NULL, NULL, NULL, current_timestamp())");
+                "(1, \'abc\', \'bcd\', 123, \'redmond\', 98022, \'usa\', 343, \'bellevue\', 98077, \'usa\', current_timestamp(), 1)," +
+                "(2, \'some\', \'one\', 444, \'seattle\', 98008, \'usa\', NULL, NULL, NULL, NULL, current_timestamp(), 1)");
 
 //        spark.table(BRONZE_SQL_TABLE).show();
         bronzeSourceStreamDf = spark.readStream()
                 .format("iceberg")
                 .load(BRONZE_SQL_TABLE);
 
-        List<String> bronzeSilver1Cols = new ArrayList<String>(bronzeToSilver1SchemaMap.keySet());
-        silverSinkStreamDf1 = bronzeSourceStreamDf.select(convertListToSeq(bronzeSilver1Cols)); // String col, Seq<String> cols
+//        List<String> bronzeSilver1Cols = new ArrayList<String>(bronzeToSilver1SchemaMap.keySet());
+//        silverSinkStreamDf1 = bronzeSourceStreamDf.select(convertListToSeq(bronzeSilver1Cols)); // String col, Seq<String> cols
+        silverSinkStreamDf1 = bronzeSourceStreamDf.select("id", "firstName", "lastName", "arrivalTime", "recordVersion");
 
         assertTrue(silverSinkStreamDf1.isStreaming());
 
         try {
             query = silverSinkStreamDf1.writeStream()
+                    .format("iceberg")
                     .trigger(Trigger.ProcessingTime("2 seconds")) // default trigger runs micro-batch as soon as it can
                     .outputMode(OutputMode.Append())
-                    .option("path", SILVER_SQL_TABLE1)
+//                    .option("path", SILVER_SQL_TABLE1) // write to silver table within forEachBatch fxn
                     .option("checkpointLocation", SILVER_TABLE_NAME1 + "_checkpoint")
-                    .foreachBatch((ds, batchId) -> {
-                        System.out.println("INSIDE THE FOR EACH BATCH FUNCTION ****************************************" + ds + " batchId=" + batchId);
-                    })
-//                    .trigger(Trigger.Once())
-//                    .format("console")
-//                    .outputMode("append")
+                    .foreachBatch(microBatchHandler)
                     .start();
-//            query.processAllAvailable(); // or wait for termination
-//            query.awaitTermination();
             assertTrue(query.isActive());
             Thread.sleep(2000); // make longer
         } catch (TimeoutException | InterruptedException e) {
             e.printStackTrace();
             tearDown();
         }
-//        } finally {
-//            try {
-//                query.stop();
-//            } catch (TimeoutException e) {
-//                e.printStackTrace();
-//            }
-//        }
     }
 
     /*
@@ -140,10 +128,6 @@ public class IcebergNormalizationTest {
      */
     @AfterClass
     public static void tearDown() {
-        // drop table
-        // delete warehouse
-        // delete checkpoints
-        // change checkpoint name in next run
         try {
             query.stop();
         } catch (TimeoutException e) {
@@ -174,52 +158,61 @@ public class IcebergNormalizationTest {
                 // may need modify to match Xiang's, group by record Id's, max cap on the batch
                 // group by id
                 // for each group, order by arrivalTime
-                System.out.println("INSIDE THE FOR EACH BATCH FUNCTION ****************************************");
-//                rowDataset.createOrReplaceTempView("updates");
-//                String upsertSql = "";
-//                rowDataset.sparkSession().sql("SELECT * FROM updates").show();
+                System.out.println("PROCESSING MICROBATCH " + aLong +" ****************************************");
+                rowDataset.createOrReplaceTempView("updates");
+                String latestRecordVersionSql =
+                        "WITH latestUpdates (id, firstName, lastName, recordVersion) AS (" +
+                                    "SELECT a.id, a.firstName, a.lastName, a.recordVersion FROM updates AS a " + // get only the rows corresponding to latest recordVersion
+                                        "INNER JOIN (" +
+                                            "SELECT id, MAX(recordVersion) as maxRecordVersion FROM updates GROUP BY id" +
+                                        ") AS b " +
+                                        "ON a.id = b.id AND a.recordVersion = b.maxRecordVersion" +
+                        ") ";
+
+                String laterRecordVersionThanTargetSql =
+                        "SELECT c.id, c.firstName, c.lastName, c.recordVersion FROM latestUpdates as c " +
+                            "LEFT OUTER JOIN SILVER_SQL_TABLE1 as d " +
+                            "ON c.id = d.id AND c.recordVersion > d.recordVersion"; // check in target table if recordVersion is greater. If so, filter out from source.
+                String mergeSql = "MERGE INTO SILVER_SQL_TABLE1 AS target " +
+                        "USING " +
+                            "(SELECT a.id, a.firstName, a.lastName, a.recordVersion FROM updates AS a " + // get only the rows corresponding to latest recordVersion
+                            "INNER JOIN (SELECT id, MAX(recordVersion) as maxRecordVersion FROM updates GROUP BY id) AS b " +
+                            "ON a.id = b.id AND a.recordVersion = b.maxRecordVersion)" +
+                        "AS source " +
+                        "ON source.id = target.id " +
+                        "WHEN MATCHED AND source.recordVersion > target.recordVersion THEN " +
+                            "UPDATE SET * " +
+                        "WHEN NOT MATCHED THEN " +
+                            "INSERT *";
+//                updatesSpark.sql("SELECT * FROM updates").show();
+//                System.out.println(latestRecordVersionSql + laterRecordVersionThanTargetSql);
+                rowDataset.sparkSession().sql(mergeSql).show();
             }
         };
     }
 
-
-//    private static class MicroBatchHandler implements VoidFunction2<Dataset<Row>, Long> {
-//        public void MicroBatchHandler() {
+//    private static void setupSchemaMappings() { // TODO update later, not a priority for this spike
+//        bronzeToSilver1SchemaMap = new LinkedHashMap<>();
+//        bronzeToSilver1SchemaMap.put("id", "id");
+//        bronzeToSilver1SchemaMap.put("firstName", "firstName");
+//        bronzeToSilver1SchemaMap.put("lastName", "lastName");
 //
-//        }
-//        public void call(Dataset<Row> rowDataset, Long aLong) throws Exception {
-//            // may need modify to match Xiang's, group by record Id's, max cap on the batch
-//            // group by id
-//            // for each group, order by arrivalTime
-//            System.out.println("INSIDE THE FOR EACH BATCH FUNCTION ****************************************");
-////                rowDataset.createOrReplaceTempView("updates");
-////                String upsertSql = "";
-////                rowDataset.sparkSession().sql("SELECT * FROM updates").show();
-//        }
+//        Map<String, String> idMap = new LinkedHashMap<>();
+//        idMap.put("id", "PartyId");
+//
+//        Map<String, String> address1Map = new LinkedHashMap<>();
+//        address1Map.put("streetNo1", "streetNo");
+//        address1Map.put("cityName1", "cityName");
+//        address1Map.put("zipcode1", "zipcode");
+//        address1Map.put("county1", "county");
+//
+//        Map<String, String> address2Map = new LinkedHashMap<>();
+//        address2Map.put("streetNo2", "streetNo");
+//        address2Map.put("cityName2", "cityName");
+//        address2Map.put("zipcode2", "zipcode");
+//        address2Map.put("county2", "county");
+//        bronzeToSilver2SchemaMap = List.of(idMap, address1Map, address2Map); // TODO write id generation logic in quip
 //    }
-
-    private static void setupSchemaMappings() {
-        bronzeToSilver1SchemaMap = new LinkedHashMap<>();
-        bronzeToSilver1SchemaMap.put("id", "id");
-        bronzeToSilver1SchemaMap.put("firstName", "firstName");
-        bronzeToSilver1SchemaMap.put("lastName", "lastName");
-
-        Map<String, String> idMap = new LinkedHashMap<>();
-        idMap.put("id", "PartyId");
-
-        Map<String, String> address1Map = new LinkedHashMap<>();
-        address1Map.put("streetNo1", "streetNo");
-        address1Map.put("cityName1", "cityName");
-        address1Map.put("zipcode1", "zipcode");
-        address1Map.put("county1", "county");
-
-        Map<String, String> address2Map = new LinkedHashMap<>();
-        address2Map.put("streetNo2", "streetNo");
-        address2Map.put("cityName2", "cityName");
-        address2Map.put("zipcode2", "zipcode");
-        address2Map.put("county2", "county");
-        bronzeToSilver2SchemaMap = List.of(idMap, address1Map, address2Map); // TODO write id generation logic in quip
-    }
 
     private static void setSparkSession() {
         spark = SparkSession
@@ -234,7 +227,7 @@ public class IcebergNormalizationTest {
     private static void setSparkConf() {
         sparkConf = new SparkConf();
         // local catalog: directory-based in HDFS, for iceberg tables
-        sparkConf.set("spark.sql.legacy.createHiveTableByDefault", "false");
+//        sparkConf.set("spark.sql.legacy.createHiveTableByDefault", "false");
         sparkConf.set("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions");
         sparkConf.set("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog");
         sparkConf.set("spark.sql.catalog.spark_catalog.type", "hive");
@@ -244,81 +237,83 @@ public class IcebergNormalizationTest {
     }
 
     private static void createBronzeTable() {
-//        Schema bronzeSchema = new Schema(
-//                Types.NestedField.required(1, "id", Types.IntegerType.get()),
-//                Types.NestedField.optional(2, "firstName", Types.StringType.get()),
-//                Types.NestedField.optional(3, "lastName", Types.StringType.get()),
-//                Types.NestedField.optional(4, "streetNo1", Types.IntegerType.get()),
-//                Types.NestedField.optional(5, "cityName1", Types.StringType.get()),
-//                Types.NestedField.optional(6, "zipcode1", Types.IntegerType.get()),
-//                Types.NestedField.optional(7, "county1", Types.StringType.get()),
-//                Types.NestedField.optional(8, "streetNo2", Types.IntegerType.get()),
-//                Types.NestedField.optional(9, "cityName2", Types.StringType.get()),
-//                Types.NestedField.optional(10, "zipcode2", Types.IntegerType.get()),
-//                Types.NestedField.optional(11, "county2", Types.StringType.get()),
-//                Types.NestedField.required(12, "arrivalTime", Types.TimestampType.withZone())
-//        );
-//
-//        PartitionSpec bronzeSpec = PartitionSpec.builderFor(bronzeSchema)
-//                .bucket("id",10)
-//                .build();
-//
-//        // Catalog method of creating Iceberg table
-//        bronzeTable = createOrReplaceHadoopTable(bronzeSchema, bronzeSpec, new HashMap<>(), BRONZE_TABLE_PATH);
+        Schema bronzeSchema = new Schema(
+                Types.NestedField.required(1, "id", Types.IntegerType.get()),
+                Types.NestedField.optional(2, "firstName", Types.StringType.get()),
+                Types.NestedField.optional(3, "lastName", Types.StringType.get()),
+                Types.NestedField.optional(4, "streetNo1", Types.IntegerType.get()),
+                Types.NestedField.optional(5, "cityName1", Types.StringType.get()),
+                Types.NestedField.optional(6, "zipcode1", Types.IntegerType.get()),
+                Types.NestedField.optional(7, "county1", Types.StringType.get()),
+                Types.NestedField.optional(8, "streetNo2", Types.IntegerType.get()),
+                Types.NestedField.optional(9, "cityName2", Types.StringType.get()),
+                Types.NestedField.optional(10, "zipcode2", Types.IntegerType.get()),
+                Types.NestedField.optional(11, "county2", Types.StringType.get()),
+                Types.NestedField.required(12, "arrivalTime", Types.TimestampType.withZone()),
+                Types.NestedField.optional(13, "recordVersion", Types.IntegerType.get())
+        );
+
+        PartitionSpec bronzeSpec = PartitionSpec.builderFor(bronzeSchema)
+                .bucket("id",10)
+                .build();
+
+        // Catalog method of creating Iceberg table
+        bronzeTable = createOrReplaceHadoopTable(bronzeSchema, bronzeSpec, new HashMap<>(), BRONZE_TABLE_PATH);
 
         spark.sql("CREATE TABLE IF NOT EXISTS " + BRONZE_SQL_TABLE +
                 "(id bigint, firstName string, lastName string," +
                 "streetNo1 int, cityName1 string, zipcode1 int, county1 string," +
-                "streetNo2 int, cityName2 string, zipcode2 int, county2 string, arrivalTime timestamp) " +
+                "streetNo2 int, cityName2 string, zipcode2 int, county2 string, arrivalTime timestamp, recordVersion int) " +
                 "USING iceberg");
     }
 
     private static void createSilverTables() {
-//        // Indiv. table
-//        Schema silverSchema1 = new Schema(
-//                Types.NestedField.required(1, "id", Types.IntegerType.get()),
-//                Types.NestedField.optional(2, "firstName", Types.StringType.get()),
-//                Types.NestedField.optional(3, "lastName", Types.StringType.get())
-//        );
-//
-//        // Contact Point Address table
-//        Schema silverSchema2 = new Schema(
-//                Types.NestedField.required(1, "AddressId", Types.IntegerType.get()),
+        // Indiv. table
+        Schema silverSchema1 = new Schema(
+                Types.NestedField.required(1, "id", Types.IntegerType.get()),
+                Types.NestedField.optional(2, "firstName", Types.StringType.get()),
+                Types.NestedField.optional(3, "lastName", Types.StringType.get()),
+                Types.NestedField.optional(4, "recordVersion", Types.IntegerType.get())
+        );
+
+        // Contact Point Address table
+        Schema silverSchema2 = new Schema(
+                Types.NestedField.required(1, "AddressId", Types.StringType.get()), // indivId_uniqueAddressId
 //                Types.NestedField.required(2, "PartyId", Types.IntegerType.get()),
-//                Types.NestedField.optional(3, "streetNo", Types.IntegerType.get()),
-//                Types.NestedField.optional(4, "cityName", Types.StringType.get()),
-//                Types.NestedField.optional(5, "zipcode", Types.IntegerType.get()),
-//                Types.NestedField.optional(6, "county", Types.StringType.get())
-//        );
-//
-//        PartitionSpec silverSpec1 = PartitionSpec.builderFor(silverSchema1)
-//                .identity("id")
-//                .bucket("id",10)
-//                .build();
-//
-//        PartitionSpec silverSpec2 = PartitionSpec.builderFor(silverSchema2)
+                Types.NestedField.optional(2, "streetNo", Types.IntegerType.get()),
+                Types.NestedField.optional(3, "cityName", Types.StringType.get()),
+                Types.NestedField.optional(4, "zipcode", Types.IntegerType.get()),
+                Types.NestedField.optional(5, "county", Types.StringType.get()) // TODO need recordVerison?
+        );
+
+        PartitionSpec silverSpec1 = PartitionSpec.builderFor(silverSchema1)
+                .identity("id")
+                .bucket("id",10)
+                .build();
+
+        PartitionSpec silverSpec2 = PartitionSpec.builderFor(silverSchema2)
 //                .bucket("PartyId",10)
-//                .build();
-//
-//        // Catalog method of creating Iceberg table
-//        silverTable1 = createOrReplaceHadoopTable(silverSchema1, silverSpec1, new HashMap<>(), SILVER_TABLE_PATH1);
-//        silverTable2 = createOrReplaceHadoopTable(silverSchema2, silverSpec2, new HashMap<>(), SILVER_TABLE_PATH2);
+                .build();
+
+        // Catalog method of creating Iceberg table
+        silverTable1 = createOrReplaceHadoopTable(silverSchema1, silverSpec1, new HashMap<>(), SILVER_TABLE_PATH1);
+        silverTable2 = createOrReplaceHadoopTable(silverSchema2, silverSpec2, new HashMap<>(), SILVER_TABLE_PATH2);
 
         spark.sql("CREATE TABLE IF NOT EXISTS " + SILVER_SQL_TABLE1 +
-                "(id bigint, firstName string, lastName string) " +
+                "(id bigint NOT NULL, firstName string, lastName string, recordVersion int) " +
                 "USING iceberg");
 
         spark.sql("CREATE TABLE IF NOT EXISTS " + SILVER_SQL_TABLE2 +
-                "(AddressId bigint, PartyId bigint, " +
+                "(AddressId string NOT NULL, " +
                 "streetNo int, cityName string, zipcode int, county string) " +
                 "USING iceberg");
     }
 
-//    private static Table createOrReplaceHadoopTable(Schema schema, PartitionSpec spec, Map<String, String> properties, String tableIdentifier) {
-//        HadoopTables tables = new HadoopTables(spark.sparkContext().hadoopConfiguration());
-//        tables.dropTable(tableIdentifier);
-//        return tables.create(schema, spec, properties, tableIdentifier);
-//    }
+    private static Table createOrReplaceHadoopTable(Schema schema, PartitionSpec spec, Map<String, String> properties, String tableIdentifier) {
+        HadoopTables tables = new HadoopTables(spark.sparkContext().hadoopConfiguration());
+        tables.dropTable(tableIdentifier);
+        return tables.create(schema, spec, properties, tableIdentifier);
+    }
 
     public static Seq<Column> convertListToSeq(List<String> inputList) {
         List<Column> inputListCols = inputList.stream().map(colName -> col(colName)).collect(Collectors.toList());
@@ -335,9 +330,9 @@ public class IcebergNormalizationTest {
 //        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
 
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\', current_timestamp())");
+                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\', current_timestamp(), 1)");
 
-        Thread.sleep(2000);
+        Thread.sleep(6000);
 
 //        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
     }
