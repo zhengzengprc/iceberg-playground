@@ -44,7 +44,7 @@ public class BronzeToSilverDenormalizationV2 {
 
         // SIMULATE INCOMING BRONZE RECORDS
         String moreInsertOrdersBronzeSQL = "INSERT INTO local.db.OrdersBronze " +
-                "SELECT MAX(OrderId) + 1, 'Orders', 'Orders.csv', MAX(OrderAmount) + 10, '8/3/2021', 'V1' FROM local.db.OrdersBronze";
+                "SELECT MAX(INT(OrderId)) + 1, 'Orders', 'Orders.csv', MAX(OrderAmount) + 10, '8/3/2021', 'V1' FROM local.db.OrdersBronze";
         for(int i = 0; i < 3; i++) {
             spark.sql(moreInsertOrdersBronzeSQL).show();
             try {
@@ -68,17 +68,22 @@ public class BronzeToSilverDenormalizationV2 {
         var bronzeDataSet = spark.readStream().format("iceberg")
                 .load("local.db.OrdersBronze");
 
+        // org.apache.spark.SparkException: The ON search condition of the MERGE statement
+        // matched a single row from the target table with multiple rows of the source table.
+        // This could result in the target row being operated on more than once with an update
+        // or delete operation and is not allowed.
+
         // MERGE INTO
         // 1). If source Record_Version is greater, update
         // 2). If source Record_Version is smaller or equal, igore
         // 3). If new record, insert
         String mergeSQL1 = "MERGE INTO local.db.OrdersSilver target " +
-                "USING (SELECT t1.* FROM sourceDataSet t1 " +
+                "USING (SELECT DISTINCT t1.* FROM sourceDataSet t1 " +
                 "       JOIN (SELECT OrderId, MAX(Record_Version) Record_Version " +
                 "             FROM sourceDataSet GROUP BY OrderId) t2 " +
                 "       ON t1.OrderId = t2.OrderId AND t1.Record_Version = t2.Record_Version" +
                 ") source " +
-                "ON source.OrderId = target.OrderId AND source.Record_Version >= target.Record_Version " +
+                "ON INT(source.OrderId) = INT(target.OrderId) AND source.Record_Version >= target.Record_Version " +
                 "WHEN MATCHED THEN " +
                 "    UPDATE SET target.OrderAmount = target.OrderAmount + source.OrderAmount " +
                 // org.apache.spark.sql.AnalysisException: cannot resolve '`target.OrderId`' given input columns: [source.DataSource, target.DataSource, source.DataSourceObject, target.DataSourceObject, source.InsertDate, source.OrderAmount, target.OrderAmount, source.OrderId, target.OrderId, source.Record_Version, target.Record_Version, target.ShipmentStatus]
@@ -93,7 +98,7 @@ public class BronzeToSilverDenormalizationV2 {
         try {
             StreamingQuery sq = bronzeDataSet.writeStream().format("iceberg")
                     .outputMode(OutputMode.Append())
-                    .option("checkpointLocation", "jobsCheckpointDir007")
+                    .option("checkpointLocation", "jobsCheckpointDir008")
                     .option("maxOffsetsPerTrigger", "1") //USELESS
                     .foreachBatch((ds, batchId) -> {
                         ds.createOrReplaceTempView("sourceDataSet");
