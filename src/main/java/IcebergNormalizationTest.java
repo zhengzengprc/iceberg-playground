@@ -10,9 +10,7 @@ import org.apache.spark.sql.*;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.streaming.OutputMode;
 import org.apache.spark.sql.streaming.StreamingQuery;
-import org.apache.spark.sql.streaming.StreamingQueryException;
 import org.apache.spark.sql.streaming.Trigger;
-import org.junit.After;
 import org.junit.BeforeClass;
 import org.junit.AfterClass;
 import org.junit.Test;
@@ -28,7 +26,7 @@ import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
+
 import scala.collection.JavaConverters;
 import scala.collection.Seq;
 
@@ -84,8 +82,8 @@ public class IcebergNormalizationTest {
      */
     @BeforeClass
     public static void setup() throws NoSuchTableException {
-        setSparkConf();
-        setSparkSession();
+        sparkConf = getSparkConf();
+        spark = getSparkSession();
         createBronzeTable();
         createSilverTables();
 //        setupSchemaMappings();
@@ -95,7 +93,6 @@ public class IcebergNormalizationTest {
                 "(1, \'abc\', \'bcd\', 123, \'redmond\', 98022, \'usa\', 343, \'bellevue\', 98077, \'usa\', current_timestamp(), 1)," +
                 "(2, \'some\', \'one\', 444, \'seattle\', 98008, \'usa\', NULL, NULL, NULL, NULL, current_timestamp(), 1)");
 
-//        spark.table(BRONZE_SQL_TABLE).show();
         bronzeSourceStreamDf = spark.readStream()
                 .format("iceberg")
                 .load(BRONZE_SQL_TABLE);
@@ -116,7 +113,7 @@ public class IcebergNormalizationTest {
                     .foreachBatch(microBatchHandler)
                     .start();
             assertTrue(query.isActive());
-            Thread.sleep(2000); // make longer
+            Thread.sleep(4000); // make longer
         } catch (TimeoutException | InterruptedException e) {
             e.printStackTrace();
             tearDown();
@@ -173,7 +170,7 @@ public class IcebergNormalizationTest {
                         "SELECT c.id, c.firstName, c.lastName, c.recordVersion FROM latestUpdates as c " +
                             "LEFT OUTER JOIN SILVER_SQL_TABLE1 as d " +
                             "ON c.id = d.id AND c.recordVersion > d.recordVersion"; // check in target table if recordVersion is greater. If so, filter out from source.
-                String mergeSql = "MERGE INTO SILVER_SQL_TABLE1 AS target " +
+                String mergeSql = "MERGE INTO " + SILVER_SQL_TABLE1 + " AS target " +
                         "USING " +
                             "(SELECT a.id, a.firstName, a.lastName, a.recordVersion FROM updates AS a " + // get only the rows corresponding to latest recordVersion
                             "INNER JOIN (SELECT id, MAX(recordVersion) as maxRecordVersion FROM updates GROUP BY id) AS b " +
@@ -186,7 +183,8 @@ public class IcebergNormalizationTest {
                             "INSERT *";
 //                updatesSpark.sql("SELECT * FROM updates").show();
 //                System.out.println(latestRecordVersionSql + laterRecordVersionThanTargetSql);
-                rowDataset.sparkSession().sql(mergeSql).show();
+                SparkSession updatesSpark = SparkSession.builder().config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions").getOrCreate();
+                updatesSpark.sql(mergeSql).show();
             }
         };
     }
@@ -214,26 +212,28 @@ public class IcebergNormalizationTest {
 //        bronzeToSilver2SchemaMap = List.of(idMap, address1Map, address2Map); // TODO write id generation logic in quip
 //    }
 
-    private static void setSparkSession() {
-        spark = SparkSession
+    private static SparkSession getSparkSession() {
+        SparkSession spark = SparkSession
                 .builder()
                 .appName("Denormalization Example")
                 .master(CATALOG)
                 .config(sparkConf)
                 .getOrCreate();
+        return spark;
 
     }
 
-    private static void setSparkConf() {
-        sparkConf = new SparkConf();
+    private static SparkConf getSparkConf() {
+        SparkConf sparkConf = new SparkConf();
         // local catalog: directory-based in HDFS, for iceberg tables
 //        sparkConf.set("spark.sql.legacy.createHiveTableByDefault", "false");
         sparkConf.set("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions");
-        sparkConf.set("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog");
-        sparkConf.set("spark.sql.catalog.spark_catalog.type", "hive");
+//        sparkConf.set("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog");
+//        sparkConf.set("spark.sql.catalog.spark_catalog.type", "hive");
         sparkConf.set("spark.sql.catalog." + CATALOG, "org.apache.iceberg.spark.SparkCatalog");
         sparkConf.set("spark.sql.catalog." + CATALOG + ".type", "hadoop");
         sparkConf.set("spark.sql.catalog." + CATALOG + ".warehouse", WAREHOUSE);
+        return sparkConf;
     }
 
     private static void createBronzeTable() {
@@ -327,14 +327,56 @@ public class IcebergNormalizationTest {
     @Test
     public void addEntireRecordTest() throws InterruptedException {
 
-//        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
+        System.out.println(BRONZE_SQL_TABLE);
+        spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
+        /*
+        local.bronze_namespace.bronze_table
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
+        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|cityName2|zipcode2|county2|         arrivalTime|recordVersion|
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
+        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343| bellevue|   98077|    usa|2021-08-31 11:19:...|            1|
+        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 11:19:...|            1|
+        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
+         */
+
+        System.out.println(SILVER_SQL_TABLE1);
+        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
+        /*
+        local.silver_namespace.silver_table1
+        +---+---------+--------+-------------+
+        | id|firstName|lastName|recordVersion|
+        +---+---------+--------+-------------+
+        +---+---------+--------+-------------+
+         */
 
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
                 "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\', current_timestamp(), 1)");
 
-        Thread.sleep(6000);
+        Thread.sleep(2000);
 
-//        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
+        System.out.println(BRONZE_SQL_TABLE);
+        spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
+
+        /*
+        local.bronze_namespace.bronze_table
+        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
+        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|    cityName2|zipcode2|county2|         arrivalTime|recordVersion|
+        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
+        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343|     bellevue|   98077|    usa|2021-08-31 11:19:...|            1|
+        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 11:19:...|            1|
+        |  3|       no|     one|      456|   boston|   90578|    usa|      888|san francisco|   99999|    usa|2021-08-31 11:19:...|            1|
+        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
+         */
+
+        System.out.println(SILVER_SQL_TABLE1);
+        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
+        /*
+        local.silver_namespace.silver_table1
+        +---+---------+--------+-------------+
+        | id|firstName|lastName|recordVersion|
+        +---+---------+--------+-------------+
+        +---+---------+--------+-------------+
+         */
     }
 
 }
