@@ -84,7 +84,7 @@ public class BronzeToSilverDenormalizationV2 {
                 "       ON t1.OrderId = t2.OrderId AND t1.Record_Version = t2.Record_Version" +
                 ") source " +
                 "ON INT(source.OrderId) = INT(target.OrderId)" +
-                "WHEN MATCHED AND source.Record_Version >= target.Record_Version THEN " +
+                "WHEN MATCHED AND source.Record_Version > target.Record_Version THEN " +
                 "    UPDATE SET target.OrderAmount = target.OrderAmount + source.OrderAmount " +
                 // org.apache.spark.sql.AnalysisException: cannot resolve '`target.OrderId`' given input columns: [source.DataSource, target.DataSource, source.DataSourceObject, target.DataSourceObject, source.InsertDate, source.OrderAmount, target.OrderAmount, source.OrderId, target.OrderId, source.Record_Version, target.Record_Version, target.ShipmentStatus]
                 //"WHEN NOT MATCHED AND (source.OrderId != target.OrderId) THEN " +
