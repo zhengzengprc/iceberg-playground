@@ -67,8 +67,7 @@ public class IcebergNormalizationTest {
     private static final String SILVER_TABLE_PATH2 = "warehouse/silver_namespace/silver_table2";
 
     private static Dataset<Row> bronzeSourceStreamDf;
-    private static Dataset<Row> silverSinkStreamDf1;
-    private static Dataset<Row> silverSinkStreamDf2_1;
+    private static Dataset<Row> silverSinkStreamDf;
 
     private static Map<String, String> bronzeToSilver1SchemaMap;
     private static List<Map<String, String>> bronzeToSilver2SchemaMap;
@@ -124,17 +123,17 @@ public class IcebergNormalizationTest {
 
 //        List<String> bronzeSilver1Cols = new ArrayList<String>(bronzeToSilver1SchemaMap.keySet());
 //        silverSinkStreamDf1 = bronzeSourceStreamDf.select(convertListToSeq(bronzeSilver1Cols)); // String col, Seq<String> cols
-        silverSinkStreamDf1 = bronzeSourceStreamDf.select("id", "firstName", "lastName", "arrivalTime", "recordVersion");
-
-        assertTrue(silverSinkStreamDf1.isStreaming());
+//        silverSinkStreamDf = bronzeSourceStreamDf.select("id", "firstName", "lastName", "arrivalTime", "recordVersion"); // TODO uncomment this to change to just indiv silver table
+        silverSinkStreamDf = bronzeSourceStreamDf.select("*");
+        assertTrue(silverSinkStreamDf.isStreaming());
 
         try {
-            query = silverSinkStreamDf1.writeStream()
+            query = silverSinkStreamDf.writeStream()
                     .format("iceberg")
                     .trigger(Trigger.ProcessingTime("2 seconds")) // default trigger runs micro-batch as soon as it can
                     .outputMode("append")
 //                    .option("path", SILVER_SQL_TABLE1) // write to silver table within forEachBatch fxn
-                    .option("checkpointLocation", SILVER_TABLE_NAME1 + "_checkpoint")
+                    .option("checkpointLocation", "checkpoint")
                     .foreachBatch(microBatchHandler)
                     .start();
             assertTrue(query.isActive());
@@ -161,7 +160,7 @@ public class IcebergNormalizationTest {
         // delete checkpts
         try {
             FileUtils.deleteDirectory(FileUtils.getFile(WAREHOUSE));
-            FileUtils.deleteDirectory(FileUtils.getFile(SILVER_TABLE_NAME1 + "_checkpoint")); // TODO: add more folders here as relevant
+            FileUtils.deleteDirectory(FileUtils.getFile("checkpoint")); // TODO: add more folders here as relevant
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -181,32 +180,38 @@ public class IcebergNormalizationTest {
                 // group by id
                 // for each group, order by arrivalTime
                 System.out.println("PROCESSING MICROBATCH " + aLong +" ****************************************");
-                rowDataset.createOrReplaceTempView("updates");
-                String latestRecordVersionSql =
-                        "WITH latestUpdates (id, firstName, lastName, recordVersion) AS (" +
-                                    "SELECT a.id, a.firstName, a.lastName, a.recordVersion FROM updates AS a " + // get only the rows corresponding to latest recordVersion
-                                        "INNER JOIN (" +
-                                            "SELECT id, MAX(recordVersion) as maxRecordVersion FROM updates GROUP BY id" +
-                                        ") AS b " +
-                                        "ON a.id = b.id AND a.recordVersion = b.maxRecordVersion" +
-                        ") ";
+                rowDataset.select("id", "firstName", "lastName", "arrivalTime", "recordVersion").createOrReplaceTempView("silver1Updates");
+                rowDataset.select("streetNo1", "cityName1", "zipcode1", "county1", "arrivalTime", "recordVersion").createOrReplaceTempView("silver21Updates");
+                rowDataset.select("streetNo2", "cityName2", "zipcode2", "county2", "arrivalTime", "recordVersion").createOrReplaceTempView("silver22Updates");
 
-                String laterRecordVersionThanTargetSql =
-                        "SELECT c.id, c.firstName, c.lastName, c.recordVersion FROM latestUpdates as c " +
-                            "LEFT OUTER JOIN SILVER_SQL_TABLE1 as d " +
-                            "ON c.id = d.id AND c.recordVersion > d.recordVersion"; // check in target table if recordVersion is greater. If so, filter out from source.
-                String mergeSql = "MERGE INTO " + SILVER_SQL_TABLE1 + " AS target " +
+                // multiple id's with same record version --> choose the one with latest arrivalTime or random/arbitrary
+                // null id --> don't merge into the silver table, filter it out
+                // null record version --> insert
+//                String maxRecordVersionSql_silver1 = "SELECT id, MAX(recordVersion) AS maxRecordVersion FROM silver1Updates WHERE recordVersion IS NOT NULL AND id IS NOT NULL GROUP BY id";
+//                String selectRowsForMaxRecordVersionSql_silver1 = "SELECT * FROM silver1Updates AS a " +
+//                        "INNER JOIN (" + maxRecordVersionSql_silver1 + ") AS b " +
+//                        "ON a.id = b.id and a.recordVersion = b.maxRecordVersion";
+//                String selectRowsForMaxArrivalTime_silver1 = "SELECT FIRST(c.id) AS id, FIRST(c.firstName) AS firstName, FIRST(c.lastName) AS lastName, FIRST(c.recordVersion) AS recordVersion " +
+//                        "FROM (" + selectRowsForMaxRecordVersionSql_silver1 + ") AS c " +
+//                        "GROUP BY id " +
+//                        "ORDER BY arrivalTime DESC";
+//
+//                String laterRecordVersionThanTargetSql =
+//                        "SELECT c.id, c.firstName, c.lastName, c.recordVersion FROM latestUpdates as c " +
+//                            "LEFT OUTER JOIN SILVER_SQL_TABLE1 as d " +
+//                            "ON c.id = d.id AND c.recordVersion > d.recordVersion"; // check in target table if recordVersion is greater. If so, filter out from source.
+                String mergeSql_silver1 = "MERGE INTO " + SILVER_SQL_TABLE1 + " AS target " +
                         "USING " +
-                            "(SELECT a.id, a.firstName, a.lastName, a.recordVersion FROM updates AS a " + // get only the rows corresponding to latest recordVersion
-                            "INNER JOIN (SELECT id, MAX(recordVersion) as maxRecordVersion FROM updates GROUP BY id) AS b " +
+                            "(SELECT a.id, a.firstName, a.lastName, a.recordVersion FROM silver1Updates AS a " + // get only the rows corresponding to latest recordVersion
+                            "INNER JOIN (SELECT id, MAX(recordVersion) as maxRecordVersion FROM silver1Updates GROUP BY id) AS b " +
                             "ON a.id = b.id AND a.recordVersion = b.maxRecordVersion)" +
-                        "AS source " +
+                        " AS source " +
                         "ON source.id = target.id " +
-                        "WHEN MATCHED AND source.recordVersion > target.recordVersion THEN " +
+                        "WHEN MATCHED AND source.recordVersion IS NOT NULL AND source.recordVersion > target.recordVersion THEN " +
                             "UPDATE SET * " +
                         "WHEN NOT MATCHED THEN " +
                             "INSERT *";
-                rowDataset.sparkSession().sql(mergeSql);
+                rowDataset.sparkSession().sql(mergeSql_silver1);
                 spark.sql("REFRESH TABLE " + SILVER_SQL_TABLE1);
             }
         };
@@ -306,7 +311,8 @@ public class IcebergNormalizationTest {
                 Types.NestedField.optional(2, "streetNo", Types.IntegerType.get()),
                 Types.NestedField.optional(3, "cityName", Types.StringType.get()),
                 Types.NestedField.optional(4, "zipcode", Types.IntegerType.get()),
-                Types.NestedField.optional(5, "county", Types.StringType.get()) // TODO need recordVerison?
+                Types.NestedField.optional(5, "county", Types.StringType.get()),
+                Types.NestedField.optional(6, "recordVersion", Types.IntegerType.get()) // TODO need recordVerison?
         );
 
         PartitionSpec silverSpec1 = PartitionSpec.builderFor(silverSchema1)
@@ -327,8 +333,7 @@ public class IcebergNormalizationTest {
                 "USING iceberg");
 
         spark.sql("CREATE TABLE IF NOT EXISTS " + SILVER_SQL_TABLE2 +
-                "(AddressId string NOT NULL, " +
-                "streetNo int, cityName string, zipcode int, county string) " +
+                "(AddressId string NOT NULL, streetNo int, cityName string, zipcode int, county string, recordVersion int) " +
                 "USING iceberg");
     }
 
