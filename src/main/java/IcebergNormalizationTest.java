@@ -8,6 +8,7 @@ import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.api.java.function.VoidFunction2;
 import org.apache.spark.sql.*;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
+import org.apache.spark.sql.expressions.Window;
 import org.apache.spark.sql.streaming.OutputMode;
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.streaming.Trigger;
@@ -17,6 +18,7 @@ import org.junit.AfterClass;
 import org.junit.Test;
 
 import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.lit;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertFalse;
 import org.apache.iceberg.*;
@@ -103,7 +105,7 @@ public class IcebergNormalizationTest {
         /*
         local.bronze_namespace.bronze_table
         +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|cityName2|zipcode2|county2|         arrivalTime|recordVersion|
+        | id|firstName|lastName|streetNo1|cityName1|zipcode1|country1|streetNo2|cityName2|zipcode2|country2|         arrivalTime|recordVersion|
         +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
         |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343| bellevue|   98077|    usa|2021-08-31 11:19:...|            1|
         |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 11:19:...|            1|
@@ -137,7 +139,7 @@ public class IcebergNormalizationTest {
                     .foreachBatch(microBatchHandler)
                     .start();
             assertTrue(query.isActive());
-            Thread.sleep(5000); // make longer
+            Thread.sleep(40000); // make longer
         } catch (TimeoutException | InterruptedException e) {
             e.printStackTrace();
             tearDown();
@@ -179,31 +181,34 @@ public class IcebergNormalizationTest {
                 // may need modify to match Xiang's, group by record Id's, max cap on the batch
                 // group by id
                 // for each group, order by arrivalTime
-                System.out.println("PROCESSING MICROBATCH " + aLong +" ****************************************");
-                rowDataset.select("id", "firstName", "lastName", "arrivalTime", "recordVersion").createOrReplaceTempView("silver1Updates");
-                rowDataset.select("streetNo1", "cityName1", "zipcode1", "county1", "arrivalTime", "recordVersion").createOrReplaceTempView("silver21Updates");
-                rowDataset.select("streetNo2", "cityName2", "zipcode2", "county2", "arrivalTime", "recordVersion").createOrReplaceTempView("silver22Updates");
 
                 // multiple id's with same record version --> choose the one with latest arrivalTime or random/arbitrary
                 // null id --> don't merge into the silver table, filter it out
                 // null record version --> insert
-//                String maxRecordVersionSql_silver1 = "SELECT id, MAX(recordVersion) AS maxRecordVersion FROM silver1Updates WHERE recordVersion IS NOT NULL AND id IS NOT NULL GROUP BY id";
-//                String selectRowsForMaxRecordVersionSql_silver1 = "SELECT * FROM silver1Updates AS a " +
-//                        "INNER JOIN (" + maxRecordVersionSql_silver1 + ") AS b " +
-//                        "ON a.id = b.id and a.recordVersion = b.maxRecordVersion";
-//                String selectRowsForMaxArrivalTime_silver1 = "SELECT FIRST(c.id) AS id, FIRST(c.firstName) AS firstName, FIRST(c.lastName) AS lastName, FIRST(c.recordVersion) AS recordVersion " +
-//                        "FROM (" + selectRowsForMaxRecordVersionSql_silver1 + ") AS c " +
-//                        "GROUP BY id " +
-//                        "ORDER BY arrivalTime DESC";
-//
-//                String laterRecordVersionThanTargetSql =
-//                        "SELECT c.id, c.firstName, c.lastName, c.recordVersion FROM latestUpdates as c " +
-//                            "LEFT OUTER JOIN SILVER_SQL_TABLE1 as d " +
-//                            "ON c.id = d.id AND c.recordVersion > d.recordVersion"; // check in target table if recordVersion is greater. If so, filter out from source.
+                Dataset<Row> ds = rowDataset.filter("id IS NOT NULL AND recordVersion IS NOT NULL")
+                        .orderBy(rowDataset.col("arrivalTime").desc())
+                        .dropDuplicates("id", "recordVersion")
+                        .withColumn("row",
+                                functions.row_number()
+                                        .over(Window.partitionBy("id")
+                                                .orderBy(rowDataset.col("recordVersion").desc())))
+                        .where("row == 1").drop("row")
+                        .toDF();
+
+                System.out.println("PROCESSING MICROBATCH " + aLong +" ****************************************");
+                ds = ds.withColumn("AddressId1", lit(1)).withColumn("AddressId2", lit(2));
+                ds.select("id", "recordVersion").createOrReplaceTempView("updates");
+                ds.select("id", "firstName", "lastName", "arrivalTime", "recordVersion").createOrReplaceTempView("silver1Updates");
+                ds.select("id", "AddressId1", "streetNo1", "cityName1", "zipcode1", "country1", "arrivalTime", "recordVersion").createOrReplaceTempView("silver21Updates");
+                ds.select("id", "AddressId2", "streetNo2", "cityName2", "zipcode2", "country2", "arrivalTime", "recordVersion").createOrReplaceTempView("silver22Updates");
+
+                String idMaxRecordVersionSql = "SELECT id, MAX(recordVersion) AS maxRecordVersion FROM updates GROUP BY id";
+                ds.sparkSession().sql(idMaxRecordVersionSql).createOrReplaceTempView("idMaxRecordVersions");
+
                 String mergeSql_silver1 = "MERGE INTO " + SILVER_SQL_TABLE1 + " AS target " +
                         "USING " +
                             "(SELECT a.id, a.firstName, a.lastName, a.recordVersion FROM silver1Updates AS a " + // get only the rows corresponding to latest recordVersion
-                            "INNER JOIN (SELECT id, MAX(recordVersion) as maxRecordVersion FROM silver1Updates GROUP BY id) AS b " +
+                            "INNER JOIN idMaxRecordVersions AS b " +
                             "ON a.id = b.id AND a.recordVersion = b.maxRecordVersion)" +
                         " AS source " +
                         "ON source.id = target.id " +
@@ -211,8 +216,43 @@ public class IcebergNormalizationTest {
                             "UPDATE SET * " +
                         "WHEN NOT MATCHED THEN " +
                             "INSERT *";
-                rowDataset.sparkSession().sql(mergeSql_silver1);
+                ds.sparkSession().sql(mergeSql_silver1);
+
+                String rowsForMaxRecordVersionSql_silver21 =
+                        "SELECT a.id AS id, a.AddressId1 AS AddressId, a.streetNo1 AS streetNo, a.cityName1 AS cityName, a.zipcode1 AS zipcode, a.country1 as country, a.recordVersion as recordVersion" +
+                                " FROM silver21Updates AS a " + // get only the rows corresponding to latest recordVersion
+                        "INNER JOIN idMaxRecordVersions AS b " +
+                        "ON a.id = b.id AND a.recordVersion = b.maxRecordVersion";
+
+                String rowsForMaxRecordVersionSql_silver22 =
+                        "SELECT a.id AS id, a.AddressId2 AS AddressId, a.streetNo2 AS streetNo, a.cityName2 AS cityName, a.zipcode2 AS zipcode, a.country2 as country, a.recordVersion as recordVersion" +
+                                " FROM silver22Updates AS a " + // get only the rows corresponding to latest recordVersion
+                        "INNER JOIN idMaxRecordVersions AS b " +
+                        "ON a.id = b.id AND a.recordVersion = b.maxRecordVersion";
+
+                String mergeSql_silver21 = "MERGE INTO " + SILVER_SQL_TABLE2 + " AS target " +
+                        "USING (" +rowsForMaxRecordVersionSql_silver21 + ") " +
+                        "AS source " +
+                        "ON source.id = target.id AND source.AddressId = target.AddressId " +
+                        "WHEN MATCHED AND source.recordVersion IS NOT NULL AND source.recordVersion > target.recordVersion THEN " +
+                            "UPDATE SET * " +
+                        "WHEN NOT MATCHED THEN " +
+                            "INSERT *";
+
+                String mergeSql_silver22 = "MERGE INTO " + SILVER_SQL_TABLE2 + " AS target " +
+                        "USING (" +rowsForMaxRecordVersionSql_silver22 + ") " +
+                        "AS source " +
+                        "ON source.id = target.id AND source.AddressId = target.AddressId " +
+                        "WHEN MATCHED AND source.recordVersion IS NOT NULL AND source.recordVersion > target.recordVersion THEN " +
+                        "UPDATE SET * " +
+                        "WHEN NOT MATCHED THEN " +
+                        "INSERT *";
+
+                ds.sparkSession().sql(mergeSql_silver21);
+                ds.sparkSession().sql(mergeSql_silver22);
                 spark.sql("REFRESH TABLE " + SILVER_SQL_TABLE1);
+                spark.sql("REFRESH TABLE " + SILVER_SQL_TABLE2);
+                spark.sql("SELECT * FROM " + SILVER_SQL_TABLE2).show();
             }
         };
     }
@@ -230,13 +270,13 @@ public class IcebergNormalizationTest {
 //        address1Map.put("streetNo1", "streetNo");
 //        address1Map.put("cityName1", "cityName");
 //        address1Map.put("zipcode1", "zipcode");
-//        address1Map.put("county1", "county");
+//        address1Map.put("country1", "country");
 //
 //        Map<String, String> address2Map = new LinkedHashMap<>();
 //        address2Map.put("streetNo2", "streetNo");
 //        address2Map.put("cityName2", "cityName");
 //        address2Map.put("zipcode2", "zipcode");
-//        address2Map.put("county2", "county");
+//        address2Map.put("country2", "country");
 //        bronzeToSilver2SchemaMap = List.of(idMap, address1Map, address2Map); // TODO write id generation logic in quip
 //    }
 
@@ -272,11 +312,11 @@ public class IcebergNormalizationTest {
                 Types.NestedField.optional(4, "streetNo1", Types.IntegerType.get()),
                 Types.NestedField.optional(5, "cityName1", Types.StringType.get()),
                 Types.NestedField.optional(6, "zipcode1", Types.IntegerType.get()),
-                Types.NestedField.optional(7, "county1", Types.StringType.get()),
+                Types.NestedField.optional(7, "country1", Types.StringType.get()),
                 Types.NestedField.optional(8, "streetNo2", Types.IntegerType.get()),
                 Types.NestedField.optional(9, "cityName2", Types.StringType.get()),
                 Types.NestedField.optional(10, "zipcode2", Types.IntegerType.get()),
-                Types.NestedField.optional(11, "county2", Types.StringType.get()),
+                Types.NestedField.optional(11, "country2", Types.StringType.get()),
                 Types.NestedField.required(12, "arrivalTime", Types.TimestampType.withZone()),
                 Types.NestedField.optional(13, "recordVersion", Types.IntegerType.get())
         );
@@ -290,8 +330,8 @@ public class IcebergNormalizationTest {
 
         spark.sql("CREATE TABLE IF NOT EXISTS " + BRONZE_SQL_TABLE +
                 "(id bigint, firstName string, lastName string," +
-                "streetNo1 int, cityName1 string, zipcode1 int, county1 string," +
-                "streetNo2 int, cityName2 string, zipcode2 int, county2 string, arrivalTime timestamp, recordVersion int) " +
+                "streetNo1 int, cityName1 string, zipcode1 int, country1 string," +
+                "streetNo2 int, cityName2 string, zipcode2 int, country2 string, arrivalTime timestamp, recordVersion int) " +
                 "USING iceberg");
     }
 
@@ -306,13 +346,14 @@ public class IcebergNormalizationTest {
 
         // Contact Point Address table
         Schema silverSchema2 = new Schema(
-                Types.NestedField.required(1, "AddressId", Types.StringType.get()), // indivId_uniqueAddressId
+                Types.NestedField.required(1, "id", Types.IntegerType.get()),
+                Types.NestedField.required(2, "AddressId", Types.IntegerType.get()), // indivId_uniqueAddressId
 //                Types.NestedField.required(2, "PartyId", Types.IntegerType.get()),
-                Types.NestedField.optional(2, "streetNo", Types.IntegerType.get()),
-                Types.NestedField.optional(3, "cityName", Types.StringType.get()),
-                Types.NestedField.optional(4, "zipcode", Types.IntegerType.get()),
-                Types.NestedField.optional(5, "county", Types.StringType.get()),
-                Types.NestedField.optional(6, "recordVersion", Types.IntegerType.get()) // TODO need recordVerison?
+                Types.NestedField.optional(3, "streetNo", Types.IntegerType.get()),
+                Types.NestedField.optional(4, "cityName", Types.StringType.get()),
+                Types.NestedField.optional(5, "zipcode", Types.IntegerType.get()),
+                Types.NestedField.optional(6, "country", Types.StringType.get()),
+                Types.NestedField.optional(7, "recordVersion", Types.IntegerType.get()) // TODO need recordVerison?
         );
 
         PartitionSpec silverSpec1 = PartitionSpec.builderFor(silverSchema1)
@@ -321,7 +362,7 @@ public class IcebergNormalizationTest {
                 .build();
 
         PartitionSpec silverSpec2 = PartitionSpec.builderFor(silverSchema2)
-//                .bucket("PartyId",10)
+                .bucket("id",10)
                 .build();
 
         // Catalog method of creating Iceberg table
@@ -333,7 +374,7 @@ public class IcebergNormalizationTest {
                 "USING iceberg");
 
         spark.sql("CREATE TABLE IF NOT EXISTS " + SILVER_SQL_TABLE2 +
-                "(AddressId string NOT NULL, streetNo int, cityName string, zipcode int, county string, recordVersion int) " +
+                "(id int NOT NULL, AddressId int NOT NULL, streetNo int, cityName string, zipcode int, country string, recordVersion int) " +
                 "USING iceberg");
     }
 
@@ -358,7 +399,7 @@ public class IcebergNormalizationTest {
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
                 "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\', current_timestamp(), 1)");
 
-        Thread.sleep(10000);
+        Thread.sleep(5000);
 
         System.out.println(BRONZE_SQL_TABLE + " AFTER NEW RECORD INSERT");
         spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
@@ -366,7 +407,7 @@ public class IcebergNormalizationTest {
         /*
         local.bronze_namespace.bronze_table
         +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
-        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|    cityName2|zipcode2|county2|         arrivalTime|recordVersion|
+        | id|firstName|lastName|streetNo1|cityName1|zipcode1|country1|streetNo2|    cityName2|zipcode2|country2|         arrivalTime|recordVersion|
         +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
         |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343|     bellevue|   98077|    usa|2021-08-31 11:19:...|            1|
         |  2|     some|     one|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 11:19:...|            1|
@@ -398,7 +439,7 @@ public class IcebergNormalizationTest {
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
                 "(2, \'some\', \'body\', 444, \'seattle\', 98008, \'usa\', null, null, null, null, current_timestamp(), 2)");
 
-        Thread.sleep(10000);
+        Thread.sleep(5000);
 
         System.out.println(BRONZE_SQL_TABLE + " AFTER EXISTING RECORD UPDATE");
         spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
@@ -406,7 +447,7 @@ public class IcebergNormalizationTest {
         /*
         local.bronze_namespace.bronze_table
         +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|cityName2|zipcode2|county2|         arrivalTime|recordVersion|
+        | id|firstName|lastName|streetNo1|cityName1|zipcode1|country1|streetNo2|cityName2|zipcode2|country2|         arrivalTime|recordVersion|
         +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
         |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343| bellevue|   98077|    usa|2021-08-31 13:46:...|            1|
         |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 13:46:...|            1|
@@ -437,7 +478,7 @@ public class IcebergNormalizationTest {
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
                 "(2, \'some\', \'one\', 444, \'seattle\', 98008, \'usa\', null, null, null, null, current_timestamp(), 1)");
 
-        Thread.sleep(10000);
+        Thread.sleep(5000);
 
         System.out.println(BRONZE_SQL_TABLE + " AFTER EXISTING RECORD \"UPDATE\"");
         spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
@@ -445,7 +486,7 @@ public class IcebergNormalizationTest {
         /*
         local.bronze_namespace.bronze_table
         +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-        | id|firstName|lastName|streetNo1|cityName1|zipcode1|county1|streetNo2|cityName2|zipcode2|county2|         arrivalTime|recordVersion|
+        | id|firstName|lastName|streetNo1|cityName1|zipcode1|country1|streetNo2|cityName2|zipcode2|country2|         arrivalTime|recordVersion|
         +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
         |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 13:48:...|            1|
         |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343| bellevue|   98077|    usa|2021-08-31 13:48:...|            1|
