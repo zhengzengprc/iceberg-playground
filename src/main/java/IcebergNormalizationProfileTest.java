@@ -181,28 +181,22 @@ public class IcebergNormalizationProfileTest {
                 // multiple id's with same record version --> choose the one with latest arrivalTime or random/arbitrary
                 // null id --> don't merge into the silver table, filter it out
                 // null record version --> insert
+                // TODO data cleanup
 
                 System.out.println("PROCESSING MICROBATCH " + batchId +" ****************************************");
                 SparkSession dsSpark = ds.sparkSession();
-//                ds = ds.withColumn("Ph_no1", lit("1")).withColumn("Ph_no2", lit("2")).withColumn("Ph_no3", lit("3"));
                 ds.select("id", "recordVersion").createOrReplaceTempView("updates");
                 ds.select("id", "name", "Ph1", "Ph2", "Ph3", "recordVersion", "recordType").createOrReplaceTempView("silver1Updates");
-//                ds.select(col("id").as("PartyId").cast("int"), col("Ph1").as("Ph").cast("int"), col("recordVersion").cast("int"), col("recordType").cast("string"))
                 ds.selectExpr("id AS PartyId", "Ph1 AS Ph", "recordVersion", "recordType")
-//                        .withColumn("ContactPointId", lit("1"))
                         .withColumn("ContactPointId", concat(col("PartyId"), lit("_"), lit("1")))
                         .createOrReplaceTempView("silver21Updates");
-//                ds.select(col("id").as("PartyId").cast("int"), col("Ph2").as("Ph").cast("int"), col("recordVersion").cast("int"), col("recordType").cast("string"))
                 ds.selectExpr("id AS PartyId", "Ph2 AS Ph", "recordVersion", "recordType")
-//                        .withColumn("ContactPointId", lit("2"))
                         .withColumn("ContactPointId", concat(col("PartyId"), lit("_"), lit("2")))
                         .createOrReplaceTempView("silver22Updates");
-//                ds.select(col("id").as("PartyId").cast("int"), col("Ph3").as("Ph").cast("int"), col("recordVersion").cast("int"), col("recordType").cast("string"))
                 ds.selectExpr("id AS PartyId", "Ph3 AS Ph", "recordVersion", "recordType")
-//                        .withColumn("ContactPointId", lit("3"))
                         .withColumn("ContactPointId", concat(col("PartyId"), lit("_"), lit("3")))
                         .createOrReplaceTempView("silver23Updates");
-                dsSpark.sql("select * from silver21Updates").show();
+                //dsSpark.sql("select * from silver21Updates").show();
                 //+-------+----+-------------+----------+--------------+
                 //|PartyId|  Ph|recordVersion|recordType|ContactPointId|
                 //+-------+----+-------------+----------+--------------+
@@ -227,9 +221,9 @@ public class IcebergNormalizationProfileTest {
                             "(source.recordType = \'delete\' OR "+ silver1AllNullCondition +") THEN " +
                             "DELETE " +
                         "WHEN MATCHED AND source.recordVersion > target.recordVersion AND source.recordType = \'overwrite\' THEN " +
-                            "UPDATE SET * " +
+                            "UPDATE SET target.id = source.id, target.name = source.name, target.Ph1 = source.Ph1, target.Ph2 = source.Ph2, target.Ph3 = source.Ph3, target.recordVersion = source.recordVersion " +
                         "WHEN NOT MATCHED AND NOT " + silver1AllNullCondition + "THEN " +
-                            "INSERT *";
+                            "INSERT (id, name, Ph1, Ph2, Ph3, recordVersion) VALUES (source.id, source.name, source.Ph1, source.Ph2, source.Ph3, source.recordVersion)";
                 dsSpark.sql(mergeSql_silver1);
 //                dsSpark.sql("select * from " + SILVER_SQL_TABLE1).show();
 
@@ -266,9 +260,9 @@ public class IcebergNormalizationProfileTest {
                             "(source.recordType = \'delete\' OR " + silver2AllNullCondition + ") THEN " +
                             "DELETE " +
                         "WHEN MATCHED AND source.recordVersion > target.recordVersion AND source.recordType = \'overwrite\' THEN " +
-                            "UPDATE SET * " +
+                            "UPDATE SET target.PartyId = source.PartyId, target.ContactPointId = source.ContactPointId, target.Ph = source.Ph, target.recordVersion = source.recordVersion " +
                         "WHEN NOT MATCHED AND NOT " + silver2AllNullCondition + " THEN " +
-                            "INSERT *";
+                            "INSERT (PartyId, ContactPointId, Ph, recordVersion) VALUES (source.PartyId, source.ContactPointId, source.Ph, source.recordVersion)";
 
                 String mergeSql_silver22 =
                         "MERGE INTO " + SILVER_SQL_TABLE2 + " AS target " +
@@ -279,9 +273,9 @@ public class IcebergNormalizationProfileTest {
                             "(source.recordType = \'delete\' OR " + silver2AllNullCondition + ") THEN " +
                             "DELETE " +
                         "WHEN MATCHED AND source.recordVersion > target.recordVersion AND source.recordType = \'overwrite\' THEN " +
-                            "UPDATE SET * " +
+                            "UPDATE SET target.PartyId = source.PartyId, target.ContactPointId = source.ContactPointId, target.Ph = source.Ph, target.recordVersion = source.recordVersion " +
                         "WHEN NOT MATCHED AND NOT " + silver2AllNullCondition + " THEN " +
-                            "INSERT *";
+                            "INSERT (PartyId, ContactPointId, Ph, recordVersion) VALUES (source.PartyId, source.ContactPointId, source.Ph, source.recordVersion)";
 
                 String mergeSql_silver23 =
                         "MERGE INTO " + SILVER_SQL_TABLE2 + " AS target " +
@@ -292,9 +286,9 @@ public class IcebergNormalizationProfileTest {
                             "(source.recordType = \'delete\' OR " + silver2AllNullCondition + ") THEN " +
                             "DELETE " +
                         "WHEN MATCHED AND source.recordVersion > target.recordVersion AND source.recordType = \'overwrite\' THEN " +
-                            "UPDATE SET * " +
+                            "UPDATE SET target.PartyId = source.PartyId, target.ContactPointId = source.ContactPointId, target.Ph = source.Ph, target.recordVersion = source.recordVersion " +
                         "WHEN NOT MATCHED AND NOT " + silver2AllNullCondition + " THEN " +
-                            "INSERT *";
+                            "INSERT (PartyId, ContactPointId, Ph, recordVersion) VALUES (source.PartyId, source.ContactPointId, source.Ph, source.recordVersion)";
 
 
                 dsSpark.sql(mergeSql_silver21);
@@ -314,6 +308,12 @@ public class IcebergNormalizationProfileTest {
                 //+--------------+-------+----+-------------+
                 //|             1|    1_3|3333|            1|
                 //|             1|    1_1|2222|            1|
+                //+--------------+-------+----+-------------+
+                //+--------------+-------+----+-------------+
+                //|ContactPointId|PartyId|  Ph|recordVersion|
+                //+--------------+-------+----+-------------+
+                //|           1_3|      1|3333|            1|
+                //|           1_1|      1|2222|            1|
                 //+--------------+-------+----+-------------+
             }
         };
