@@ -103,13 +103,13 @@ public class IcebergNormalizationProfileTest {
         try {
             query = silverSinkStreamDf.writeStream()
                     .format("iceberg")
-                    .trigger(Trigger.ProcessingTime("25 seconds")) // default trigger runs micro-batch as soon as it can
+                    .trigger(Trigger.ProcessingTime("26 seconds")) // default trigger runs micro-batch as soon as it can
                     .outputMode("append")
                     .option("checkpointLocation", "checkpoint")
                     .foreachBatch(microBatchHandler)
                     .start();
             assertTrue(query.isActive());
-            Thread.sleep(60000); // make longer
+            Thread.sleep(20000); // make longer
         } catch (TimeoutException | InterruptedException e) {
             e.printStackTrace();
             tearDown();
@@ -118,37 +118,31 @@ public class IcebergNormalizationProfileTest {
         System.out.println(BRONZE_SQL_TABLE + " BEGINNING");
         bronzeSparkDataset =  spark.read().format("iceberg").table(BRONZE_SQL_TABLE);
         bronzeSparkDataset.show();
-        /*
-        local.bronze_namespace.bronze_table
-        +---+----+----+----+----+-------------+----------+
-        | id|name| Ph1| Ph2| Ph3|recordVersion|recordType|
-        +---+----+----+----+----+-------------+----------+
-        |  1|Some|2222|null|3333|            1| overwrite|
-        +---+----+----+----+----+-------------+----------+
-         */
+        // local.bronze_namespace.bronze_table
+        // +---+----+----+----+----+-------------+----------+
+        //| id|name| Ph1| Ph2| Ph3|recordVersion|recordType|
+        //+---+----+----+----+----+-------------+----------+
+        //|  1|Some|2222|null|3333|            1| overwrite|
+        //+---+----+----+----+----+-------------+----------+
         System.out.println(SILVER_SQL_TABLE1 + " BEGINNING");
         silverSparkDataset1 =  spark.read().format("iceberg").table(SILVER_SQL_TABLE1);
         silverSparkDataset1.show();
-        /*
-        local.bronze_namespace.silver_table1
-        +---+----+----+----+----+-------------+
-        | id|name| Ph1| Ph2| Ph3|recordVersion|
-        +---+----+----+----+----+-------------+
-        |  1|Some|2222|null|3333|            1|
-        +---+----+----+----+----+-------------+
-         */
+        // local.bronze_namespace.silver_table1
+        // +---+----+----+----+----+-------------+
+        //| id|name| Ph1| Ph2| Ph3|recordVersion|
+        //+---+----+----+----+----+-------------+
+        //|  1|Some|2222|null|3333|            1|
+        //+---+----+----+----+----+-------------+
         System.out.println(SILVER_SQL_TABLE2 + " BEGINNING");
         silverSparkDataset2 =  spark.read().format("iceberg").table(SILVER_SQL_TABLE2);
         silverSparkDataset2.show();
-        /*
-        local.bronze_namespace.silver_table2
-        +--------------+-------+----+-------------+
-        |ContactPointId|PartyId|  Ph|recordVersion|
-        +--------------+-------+----+-------------+
-        |             1|      1|2222|            1|
-        |             1|      3|3333|            1|
-        +--------------+-------+----+-------------+
-         */
+        // local.bronze_namespace.silver_table2
+        // +--------------+-------+----+-------------+
+        //|ContactPointId|PartyId|  Ph|recordVersion|
+        //+--------------+-------+----+-------------+
+        //|           1_1|      1|2222|            1|
+        //|           1_3|      1|3333|            1|
+        //+--------------+-------+----+-------------+
     }
 
     /*
@@ -225,7 +219,6 @@ public class IcebergNormalizationProfileTest {
                         "WHEN NOT MATCHED AND NOT " + silver1AllNullCondition + "THEN " +
                             "INSERT (id, name, Ph1, Ph2, Ph3, recordVersion) VALUES (source.id, source.name, source.Ph1, source.Ph2, source.Ph3, source.recordVersion)";
                 dsSpark.sql(mergeSql_silver1);
-//                dsSpark.sql("select * from " + SILVER_SQL_TABLE1).show();
 
 //                dsSpark.sql("UPDATE silver21Updates SET Ph_no1 = CONCAT(CAST(id AS string), \"_\", Ph_no1)");
 //                dsSpark.sql("UPDATE silver22Updates SET Ph_no2 = CONCAT(CAST(id AS string), \"_\", Ph_no2)");
@@ -296,13 +289,13 @@ public class IcebergNormalizationProfileTest {
                 dsSpark.sql(mergeSql_silver23);
                 spark.sql("REFRESH TABLE " + SILVER_SQL_TABLE1);
                 spark.sql("REFRESH TABLE " + SILVER_SQL_TABLE2);
-                spark.sql("select * from " + SILVER_SQL_TABLE1).show();
+//                spark.sql("select * from " + SILVER_SQL_TABLE1).show();
                 //+---+----+----+----+----+-------------+
                 //| id|name| Ph1| Ph2| Ph3|recordVersion|
                 //+---+----+----+----+----+-------------+
                 //|  1|Some|2222|null|3333|            1|
                 //+---+----+----+----+----+-------------+
-                spark.sql("select * from " + SILVER_SQL_TABLE2).show();
+//                spark.sql("select * from " + SILVER_SQL_TABLE2).show();
                 //+--------------+-------+----+-------------+
                 //|ContactPointId|PartyId|  Ph|recordVersion|
                 //+--------------+-------+----+-------------+
@@ -422,130 +415,81 @@ public class IcebergNormalizationProfileTest {
     }
 
     @Test
-    public void overwriteInsertTest() {
+    public void overwriteInsertTest() throws InterruptedException {
+        Thread.sleep(2000);
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
                 "(1, \'Some\', 2222, 4444, 3333, 2, \'overwrite\')");
+        Thread.sleep(2000);
+        System.out.println(BRONZE_SQL_TABLE);
+        bronzeSparkDataset =  spark.read().format("iceberg").table(BRONZE_SQL_TABLE);
+        bronzeSparkDataset.show();
+        //local.bronze_namespace.bronze_table
+        //+---+----+----+----+----+-------------+----------+
+        //| id|name| Ph1| Ph2| Ph3|recordVersion|recordType|
+        //+---+----+----+----+----+-------------+----------+
+        //|  1|Some|2222|null|3333|            1| overwrite|
+        //|  1|Some|2222|4444|3333|            2| overwrite|
+        //+---+----+----+----+----+-------------+----------+
+        System.out.println(SILVER_SQL_TABLE1);
+        silverSparkDataset1 =  spark.read().format("iceberg").table(SILVER_SQL_TABLE1);
+        silverSparkDataset1.show();
+        //local.bronze_namespace.silver_table1
+        //+---+----+----+----+----+-------------+
+        //| id|name| Ph1| Ph2| Ph3|recordVersion|
+        //+---+----+----+----+----+-------------+
+        //|  1|Some|2222|null|3333|            1|
+        //+---+----+----+----+----+-------------+
+
+        System.out.println(SILVER_SQL_TABLE2);
+        silverSparkDataset2 =  spark.read().format("iceberg").table(SILVER_SQL_TABLE2);
+        silverSparkDataset2.show();
+        // local.bronze_namespace.silver_table2
+        //+--------------+-------+----+-------------+
+        //|ContactPointId|PartyId|  Ph|recordVersion|
+        //+--------------+-------+----+-------------+
+        //|           1_1|      1|2222|            1|
+        //|           1_3|      1|3333|            1|
+        //+--------------+-------+----+-------------+
     }
 
     @Test
-    public void overwriteDeleteTest() {
+    public void overwriteDeleteTest() throws InterruptedException {
+        Thread.sleep(2000);
         spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
                 "(1, \'Some\', null, 5555, 3333, 3, \'overwrite\')");
+        Thread.sleep(2000);
+        System.out.println(BRONZE_SQL_TABLE);
+        bronzeSparkDataset =  spark.read().format("iceberg").table(BRONZE_SQL_TABLE);
+        bronzeSparkDataset.show();
+        //local.bronze_namespace.bronze_table
+        //+---+----+----+----+----+-------------+----------+
+        //| id|name| Ph1| Ph2| Ph3|recordVersion|recordType|
+        //+---+----+----+----+----+-------------+----------+
+        //|  1|Some|2222|null|3333|            1| overwrite|
+        //|  1|Some|null|5555|3333|            3| overwrite|
+        //|  1|Some|2222|4444|3333|            2| overwrite|
+        //+---+----+----+----+----+-------------+----------+
+        System.out.println(SILVER_SQL_TABLE1);
+        silverSparkDataset1 =  spark.read().format("iceberg").table(SILVER_SQL_TABLE1);
+        silverSparkDataset1.show();
+        //local.bronze_namespace.silver_table1
+        //+---+----+----+----+----+-------------+
+        //| id|name| Ph1| Ph2| Ph3|recordVersion|
+        //+---+----+----+----+----+-------------+
+        //|  1|Some|2222|null|3333|            1|
+        //+---+----+----+----+----+-------------+
+
+        System.out.println(SILVER_SQL_TABLE2);
+        silverSparkDataset2 =  spark.read().format("iceberg").table(SILVER_SQL_TABLE2);
+        silverSparkDataset2.show();
+        // local.bronze_namespace.silver_table2
+        //+--------------+-------+----+-------------+
+        //|ContactPointId|PartyId|  Ph|recordVersion|
+        //+--------------+-------+----+-------------+
+        //|           1_1|      1|2222|            1|
+        //|           1_3|      1|3333|            1|
+        //+--------------+-------+----+-------------+
     }
-
-//    @Test
-//    public void addEntireRecordTest() throws InterruptedException {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(3, \'no\', \'one\', 456, \'boston\', 90578, \'usa\', 888, \'san francisco\', 99999, \'usa\', current_timestamp(), 1)");
-//
-//        Thread.sleep(5000);
-//
-//        System.out.println(BRONZE_SQL_TABLE + " AFTER NEW RECORD INSERT");
-//        spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
-//
-//        /*
-//        local.bronze_namespace.bronze_table
-//        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
-//        | id|firstName|lastName|streetNo1|cityName1|zipcode1|country1|streetNo2|    cityName2|zipcode2|country2|         arrivalTime|recordVersion|
-//        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
-//        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343|     bellevue|   98077|    usa|2021-08-31 11:19:...|            1|
-//        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|         null|    null|   null|2021-08-31 11:19:...|            1|
-//        |  3|       no|     one|      456|   boston|   90578|    usa|      888|san francisco|   99999|    usa|2021-08-31 11:19:...|            1| <--
-//        +---+---------+--------+---------+---------+--------+-------+---------+-------------+--------+-------+--------------------+-------------+
-//         */
-//
-//        System.out.println(SILVER_SQL_TABLE1 + " AFTER NEW RECORD INSERT");
-//        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
-//        /*
-//        local.silver_namespace.silver_table1
-//        +---+---------+--------+-------------+
-//        | id|firstName|lastName|recordVersion|
-//        +---+---------+--------+-------------+
-//        |  3|       no|     one|            1| <--
-//        |  1|      abc|     bcd|            1|
-//        |  2|     some|     one|            1|
-//        +---+---------+--------+-------------+
-//         */
-//    }
-//
-//    /*
-//    Scenario 2: update existing records
-//    Update an existing bronze record (new recordVersion). Corresponding row(s) in silver table(s) should be updated.
-//     */
-//
-//    @Test
-//    public void updateExistingRecordTest() throws InterruptedException {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(2, \'some\', \'body\', 444, \'seattle\', 98008, \'usa\', null, null, null, null, current_timestamp(), 2)");
-//
-//        Thread.sleep(5000);
-//
-//        System.out.println(BRONZE_SQL_TABLE + " AFTER EXISTING RECORD UPDATE");
-//        spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
-//
-//        /*
-//        local.bronze_namespace.bronze_table
-//        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-//        | id|firstName|lastName|streetNo1|cityName1|zipcode1|country1|streetNo2|cityName2|zipcode2|country2|         arrivalTime|recordVersion|
-//        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-//        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343| bellevue|   98077|    usa|2021-08-31 13:46:...|            1|
-//        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 13:46:...|            1|
-//        |  2|     some|    body|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 13:46:...|            2| <--
-//        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-//         */
-//
-//        System.out.println(SILVER_SQL_TABLE1 + " AFTER EXISTING RECORD UPDATE");
-//        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
-//        /*
-//        local.silver_namespace.silver_table1
-//        +---+---------+--------+-------------+
-//        | id|firstName|lastName|recordVersion|
-//        +---+---------+--------+-------------+
-//        |  2|     some|    body|            2| <--
-//        |  1|      abc|     bcd|            1|
-//        +---+---------+--------+-------------+
-//         */
-//    }
-//
-//        /*
-//    Scenario 3: don't update existing records
-//    "Update" an existing bronze record (old recordVersion). Corresponding row(s) in silver table(s) should NOT be updated.
-//     */
-//
-//    @Test
-//    public void dontUpdateExistingRecordTest() throws InterruptedException {
-//        spark.sql("INSERT INTO " + BRONZE_SQL_TABLE + " VALUES " +
-//                "(2, \'some\', \'one\', 444, \'seattle\', 98008, \'usa\', null, null, null, null, current_timestamp(), 1)");
-//
-//        Thread.sleep(5000);
-//
-//        System.out.println(BRONZE_SQL_TABLE + " AFTER EXISTING RECORD \"UPDATE\"");
-//        spark.read().format("iceberg").table(BRONZE_SQL_TABLE).show();
-//
-//        /*
-//        local.bronze_namespace.bronze_table
-//        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-//        | id|firstName|lastName|streetNo1|cityName1|zipcode1|country1|streetNo2|cityName2|zipcode2|country2|         arrivalTime|recordVersion|
-//        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-//        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 13:48:...|            1|
-//        |  1|      abc|     bcd|      123|  redmond|   98022|    usa|      343| bellevue|   98077|    usa|2021-08-31 13:48:...|            1|
-//        |  2|     some|     one|      444|  seattle|   98008|    usa|     null|     null|    null|   null|2021-08-31 13:48:...|            1| <--
-//        +---+---------+--------+---------+---------+--------+-------+---------+---------+--------+-------+--------------------+-------------+
-//         */
-//
-//        System.out.println(SILVER_SQL_TABLE1 + " AFTER EXISTING RECORD \"UPDATE\"");
-//        spark.read().format("iceberg").table(SILVER_SQL_TABLE1).show();
-//        /*
-//        local.silver_namespace.silver_table1
-//        +---+---------+--------+-------------+
-//        | id|firstName|lastName|recordVersion|
-//        +---+---------+--------+-------------+
-//        |  1|      abc|     bcd|            1|
-//        |  2|     some|     one|            1| <-- NO CHANGE
-//        +---+---------+--------+-------------+
-//         */
-//    }
-
 }
 
 
