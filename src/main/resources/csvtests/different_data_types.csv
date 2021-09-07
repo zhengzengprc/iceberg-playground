@@ -1,0 +1,2 @@
+boolean,int,long,float,double,timestamp,timestampz,date
+True,10,123456789123456789,1.1F,1.23456D,2021-10-23T18:25:43.511,2021-10-23T18:25:43.511Z,2022-09-24

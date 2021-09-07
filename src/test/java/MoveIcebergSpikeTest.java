@@ -1,31 +1,26 @@
-import org.apache.hadoop.hbase.util.Threads;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.actions.Actions;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.hadoop.HadoopTables;
-import org.apache.iceberg.spark.SparkSchemaUtil;
 import org.apache.iceberg.types.Types;
 import org.apache.spark.SparkConf;
-import org.apache.spark.api.java.function.FlatMapFunction;
 import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.streaming.OutputMode;
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.streaming.StreamingQueryException;
-import org.datanucleus.query.expression.Expression;
 import org.junit.Before;
 import org.junit.Test;
 
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
+import static org.apache.iceberg.expressions.Expressions.ref;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -158,6 +153,11 @@ public class MoveIcebergSpikeTest {
         properties.put("format-version", tableVersion);
         Table table = createOrReplaceHadoopTable(schema, PartitionSpec.unpartitioned(), properties, tableId);
 
+        // ************ WITHOUT THIS PART *************** WILL BE OVERWRITE
+        table.updateSpec()
+                .addField(ref("location"))
+                .commit();
+
         // 2.Insert (no upserts only inserts) data into the table
         Dataset<Row> df = spark.read()
                 .option("header", "true")
@@ -165,11 +165,14 @@ public class MoveIcebergSpikeTest {
         df.writeTo(targetDBName).append();
         df.show();
 
+        table.refresh();
+
         // 3.Delete rows from the table & make sure that it generates Snapshots of type: Delete
         // Snapshot of type OVERWRITE?
-        //table.newDelete().deleteFromRowFilter(Expressions.alwaysTrue()).commit();
-        spark.sql("DELETE FROM local.db.icebergspiketesting WHERE location = \"Redmond\"");
+        table.newDelete().deleteFromRowFilter(Expressions.equal("location", "Redmond")).commit();
+        //spark.sql("DELETE FROM local.db.icebergspiketesting WHERE location = \"Redmond\"");
         df = spark.table(targetDBName);
+        table.refresh();
         df.show();
         assertEquals(2, df.count());
     }
@@ -200,8 +203,8 @@ public class MoveIcebergSpikeTest {
         df.writeTo(targetDBName).append();
         df.show();
 
-        df.writeTo(targetDBName).replace();
-        df.show();
+        // df.writeTo(targetDBName).replace();
+        // df.show();
         // 4.Run table maintenance on the iceberg table - to expire snapshots
         // Observer nothing?
         Actions.forTable(table).rewriteDataFiles()
@@ -219,6 +222,11 @@ public class MoveIcebergSpikeTest {
         config.set("spark.sql.catalog.local.type", "hadoop");
         config.set("spark.sql.catalog.local.warehouse", "spark-warehouse");
         return config;
+    }
+
+    private Table loadHadoopTable(String location) {
+        HadoopTables tables = new HadoopTables(spark.sparkContext().hadoopConfiguration());
+        return tables.load(location);
     }
 
     private Table createOrReplaceHadoopTable(Schema schema, PartitionSpec spec, Map<String, String> properties, String tableIdentifier) {

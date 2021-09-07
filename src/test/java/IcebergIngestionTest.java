@@ -4,6 +4,7 @@ import static org.apache.spark.sql.functions.lit;
 
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.SchemaParser;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.UpdateSchema;
 import org.apache.iceberg.hadoop.HadoopTables;
@@ -15,6 +16,7 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.types.StringType;
+import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.Before;
 import org.junit.Test;
@@ -215,6 +217,36 @@ public class IcebergIngestionTest {
                 .addField(month("event_time"))
                 .removeField(hour("event_time"))
                 .commit();
+    }
+
+    // Iceberg schema data types: https://iceberg.apache.org/schemas/
+    @Test
+    public void testIceBergDifferentDataTypes() {
+        final String targetDBName = "local.db.differentdatatypes";
+        final String hadoopTablePath = "spark-warehouse/db/differentdatatypes";
+        final String path = TEST_FILE_DIR_PATH + "/different_data_types.csv";
+        Dataset<Row> df = spark.read()
+                .option("header", "true")
+                .csv(path);
+        df.writeTo(targetDBName).createOrReplace();
+
+        Dataset<Row> dfWithInfer = spark.read()
+                .option("header", "true")
+                .option("inferSchema", "true")
+                .csv(path);
+
+        StructField[] dfWithInferFields = dfWithInfer.schema().fields();
+
+        String schemaString = SchemaParser.toJson(SparkSchemaUtil.convert(dfWithInfer.schema()));
+        Table table = loadHadoopTable(hadoopTablePath);
+        UpdateSchema updateSchema = table.updateSchema();
+        Arrays.stream(df.schema().fields())
+                .forEach(z -> updateSchema.updateColumnDoc(z.name(), Arrays.stream(dfWithInferFields).filter(f -> f.name().equalsIgnoreCase(z.name())).findFirst().get().dataType().json()));
+        updateSchema.commit();
+        table.refresh();
+
+        df = spark.table(targetDBName);
+        df.printSchema();
     }
 
     static private SparkConf getSparkConfig() {

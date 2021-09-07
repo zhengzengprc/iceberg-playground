@@ -37,12 +37,26 @@ public class IcebergIngestionJsonTest {
     public void testIcebergReadFromJsonSuccessful() {
         final String targetDBName = "local.db.individualjson";
         final String path = TEST_FILE_DIR_PATH + "/individual.json";
-        Dataset<Row> df = spark.read().json(path);
+        Dataset<Row> df = spark.read().option("primitivesAsString", "true").json(path);
         df.writeTo(targetDBName).createOrReplace();
         df = spark.table(targetDBName);
         df.printSchema();
         df.show();
         assertEquals(2, df.count());
+    }
+
+    @Test
+    public void testIcebergReadFromJsonArraySuccessful() {
+        final String targetDBName = "local.db.individualwitharrayjson";
+        final String path = TEST_FILE_DIR_PATH + "/individual_with_array.json";
+        Dataset<Row> df = spark.read().option("primitivesAsString", "true").json(path);
+        df.writeTo(targetDBName).createOrReplace();
+        df = spark.table(targetDBName);
+        df.printSchema();
+        df.show();
+        assertEquals(2, df.count());
+        Dataset<Row> df3 = spark.sql("select * from local.db.individualwitharrayjson where address[1].cityName=\"Fremont\"");
+        df3.show();
     }
 
     @Test
@@ -94,7 +108,7 @@ public class IcebergIngestionJsonTest {
     }
 
     @Test
-    public void testIcebergReadFromJsonOrderChangeSuccessful() throws NoSuchTableException {
+    public void testIcebergReadFromJsonOrderChangeSuccessful() {
         final String targetDBName = "local.db.individualorderchangejson";
         final String path = TEST_FILE_DIR_PATH + "/individual_order_change.json";
         Dataset<Row> df = spark.read().json(path);
