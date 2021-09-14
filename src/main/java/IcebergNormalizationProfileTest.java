@@ -167,21 +167,21 @@ public class IcebergNormalizationProfileTest {
 
                 System.out.println("PROCESSING MICROBATCH " + batchId +" ****************************************");
                 SparkSession dsSpark = ds.sparkSession();
-                ds.select("id", "recordVersion").createOrReplaceTempView("updates");
+
+                // construct silver1Updates and silver2Updates temp views
                 ds.select("id", "name", "Ph1", "Ph2", "Ph3", "recordVersion", "_recordType").createOrReplaceTempView("silver1Updates");
-                ds.selectExpr("id AS PartyId", "Ph1 AS Ph", "recordVersion", "_recordType")
-                        .withColumn("ContactPointId", concat(col("PartyId"), lit("_"), lit("1")))
-                        .createOrReplaceTempView("silver21Updates");
-                ds.selectExpr("id AS PartyId", "Ph2 AS Ph", "recordVersion", "_recordType")
-                        .withColumn("ContactPointId", concat(col("PartyId"), lit("_"), lit("2")))
-                        .createOrReplaceTempView("silver22Updates");
-                ds.selectExpr("id AS PartyId", "Ph3 AS Ph", "recordVersion", "_recordType")
-                        .withColumn("ContactPointId", concat(col("PartyId"), lit("_"), lit("3")))
-                        .createOrReplaceTempView("silver23Updates");
-                String idMaxRecordVersionSql = "SELECT id, MAX(recordVersion) AS maxRecordVersion FROM updates GROUP BY id";
+                Dataset<Row> silver21UpdatesDs = ds.selectExpr("id AS PartyId", "Ph1 AS Ph", "recordVersion", "_recordType")
+                        .withColumn("ContactPointId", concat(col("PartyId"), lit("_"), lit("1")));
+                Dataset<Row> silver22UpdatesDs = ds.selectExpr("id AS PartyId", "Ph2 AS Ph", "recordVersion", "_recordType")
+                        .withColumn("ContactPointId", concat(col("PartyId"), lit("_"), lit("2")));
+                Dataset<Row> silver23UpdatesDs = ds.selectExpr("id AS PartyId", "Ph3 AS Ph", "recordVersion", "_recordType")
+                        .withColumn("ContactPointId", concat(col("PartyId"), lit("_"), lit("3")));
+                silver21UpdatesDs.unionAll(silver22UpdatesDs).unionAll(silver23UpdatesDs).createOrReplaceTempView("silver2Updates");
+
+                String idMaxRecordVersionSql = "SELECT id, MAX(recordVersion) AS maxRecordVersion FROM silver1Updates GROUP BY id";
                 dsSpark.sql(idMaxRecordVersionSql).createOrReplaceTempView("idMaxRecordVersions");
 
-
+                // silver 1 merge into semantics
                 String rowsForMaxRecordVersionSql_silver1 =
                         "(SELECT a.id, a.name, a.Ph1, a.Ph2, a.Ph3, a.recordVersion, a._recordType " +
                             "FROM silver1Updates AS a " + // get only the rows corresponding to latest recordVersion
@@ -204,28 +204,16 @@ public class IcebergNormalizationProfileTest {
 
                 // Note: UPDATE SET is not yet supported. To get MERGE INTO to work: https://www.mail-archive.com/dev@iceberg.apache.org/msg01895.html
 
+                // silver 2 merge into semantics
+                String rowsForMaxRecordVersionSql_silver2 =
+                        "(SELECT a.PartyId, a.ContactPointId, a.Ph, a.recordVersion, a._recordType " +
+                                "FROM silver2Updates AS a " + // get only the rows corresponding to latest recordVersion
+                                "INNER JOIN idMaxRecordVersions AS b " +
+                                "ON a.PartyId = b.id AND a.recordVersion = b.maxRecordVersion) ";
                 String silver2AllNullCondition = "source.Ph IS NULL ";
-                String rowsForMaxRecordVersionSql_silver21 =
-                        "(SELECT a.PartyId, a.ContactPointId, a.Ph, a.recordVersion, a._recordType " +
-                                "FROM silver21Updates AS a " + // get only the rows corresponding to latest recordVersion
-                                "INNER JOIN idMaxRecordVersions AS b " +
-                                "ON a.PartyId = b.id AND a.recordVersion = b.maxRecordVersion) ";
-
-                String rowsForMaxRecordVersionSql_silver22 =
-                        "(SELECT a.PartyId, a.ContactPointId, a.Ph, a.recordVersion, a._recordType " +
-                                "FROM silver22Updates AS a " + // get only the rows corresponding to latest recordVersion
-                                "INNER JOIN idMaxRecordVersions AS b " +
-                                "ON a.PartyId = b.id AND a.recordVersion = b.maxRecordVersion) ";
-
-                String rowsForMaxRecordVersionSql_silver23 =
-                        "(SELECT a.PartyId, a.ContactPointId, a.Ph, a.recordVersion, a._recordType " +
-                                "FROM silver23Updates AS a " + // get only the rows corresponding to latest recordVersion
-                                "INNER JOIN idMaxRecordVersions AS b " +
-                                "ON a.PartyId = b.id AND a.recordVersion = b.maxRecordVersion) ";
-
-                String mergeSql_silver21 =
+                String mergeSql_silver2 =
                         "MERGE INTO " + SILVER_SQL_TABLE2 + " AS target " +
-                        "USING " +rowsForMaxRecordVersionSql_silver21 +
+                        "USING " + rowsForMaxRecordVersionSql_silver2 +
                         "AS source " +
                         "ON source.PartyId = target.PartyId AND source.ContactPointId = target.ContactPointId " +
                         "WHEN MATCHED AND source.recordVersion > target.recordVersion AND " +
@@ -236,36 +224,7 @@ public class IcebergNormalizationProfileTest {
                         "WHEN NOT MATCHED AND NOT " + silver2AllNullCondition + " THEN " +
                             "INSERT (PartyId, ContactPointId, Ph, recordVersion) VALUES (source.PartyId, source.ContactPointId, source.Ph, source.recordVersion)";
 
-                String mergeSql_silver22 =
-                        "MERGE INTO " + SILVER_SQL_TABLE2 + " AS target " +
-                        "USING " +rowsForMaxRecordVersionSql_silver22 +
-                        "AS source " +
-                        "ON source.PartyId = target.PartyId AND source.ContactPointId = target.ContactPointId " +
-                        "WHEN MATCHED AND source.recordVersion > target.recordVersion AND " +
-                            "(source._recordType = \'delete\' OR " + silver2AllNullCondition + ") THEN " +
-                            "DELETE " +
-                        "WHEN MATCHED AND source.recordVersion > target.recordVersion AND source._recordType = \'upsert\' THEN " +
-                            "UPDATE SET target.PartyId = source.PartyId, target.ContactPointId = source.ContactPointId, target.Ph = source.Ph, target.recordVersion = source.recordVersion " +
-                        "WHEN NOT MATCHED AND NOT " + silver2AllNullCondition + " THEN " +
-                            "INSERT (PartyId, ContactPointId, Ph, recordVersion) VALUES (source.PartyId, source.ContactPointId, source.Ph, source.recordVersion)";
-
-                String mergeSql_silver23 =
-                        "MERGE INTO " + SILVER_SQL_TABLE2 + " AS target " +
-                        "USING " +rowsForMaxRecordVersionSql_silver23 +
-                        "AS source " +
-                        "ON source.PartyId = target.PartyId AND source.ContactPointId = target.ContactPointId " +
-                        "WHEN MATCHED AND source.recordVersion > target.recordVersion AND " +
-                            "(source._recordType = \'delete\' OR " + silver2AllNullCondition + ") THEN " +
-                            "DELETE " +
-                        "WHEN MATCHED AND source.recordVersion > target.recordVersion AND source._recordType = \'upsert\' THEN " +
-                            "UPDATE SET target.PartyId = source.PartyId, target.ContactPointId = source.ContactPointId, target.Ph = source.Ph, target.recordVersion = source.recordVersion " +
-                        "WHEN NOT MATCHED AND NOT " + silver2AllNullCondition + " THEN " +
-                            "INSERT (PartyId, ContactPointId, Ph, recordVersion) VALUES (source.PartyId, source.ContactPointId, source.Ph, source.recordVersion)";
-
-
-                dsSpark.sql(mergeSql_silver21);
-                dsSpark.sql(mergeSql_silver22);
-                dsSpark.sql(mergeSql_silver23);
+                dsSpark.sql(mergeSql_silver2);
                 spark.sql("REFRESH TABLE " + SILVER_SQL_TABLE1);
                 spark.sql("REFRESH TABLE " + SILVER_SQL_TABLE2);
             }
