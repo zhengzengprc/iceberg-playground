@@ -1,4 +1,3 @@
-import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -14,32 +13,24 @@ import org.apache.iceberg.*;
 import org.apache.iceberg.hadoop.HadoopTables;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
-import org.apache.iceberg.spark.SparkReadOptions;
-import org.apache.iceberg.spark.SparkWriteOptions;
 import org.apache.iceberg.types.Types;
+import org.apache.spark.SparkConf;
 import org.apache.spark.sql.*;
-import org.junit.AfterClass;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
-
-import javax.xml.crypto.Data;
+import org.junit.*;
 
 import static org.apache.iceberg.types.Types.NestedField.optional;
 
 public class IcebergSnapshotVersioningTest {
     private static final Configuration CONF = new Configuration();
 
-    @Rule
-    public TemporaryFolder temp = new TemporaryFolder();
-
     private static SparkSession spark = null;
+
+    Faker faker = new Faker();
 
     @BeforeClass
     public static void startSpark() {
-        IcebergSnapshotVersioningTest.spark = SparkSession.builder().master("local[2]").getOrCreate();
+        SparkConf sparkConf = getSparkConfig();
+        IcebergSnapshotVersioningTest.spark = SparkSession.builder().master("local[2]").config(sparkConf).getOrCreate();
     }
 
     @AfterClass
@@ -49,20 +40,32 @@ public class IcebergSnapshotVersioningTest {
         currentSpark.stop();
     }
 
+    static private SparkConf getSparkConfig() {
+        SparkConf config = new SparkConf();
+        config.set("spark.sql.legacy.createHiveTableByDefault", "false");
+        config.set("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions");
+        config.set("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog");
+        config.set("spark.sql.catalog.local.type", "hadoop");
+        config.set("spark.sql.catalog.local.warehouse", "spark-warehouse");
+        return config;
+    }
+
     @Test
     public void testSnapshotSelectionBySnapshotId() throws IOException {
-        String tableLocation = temp.newFolder("iceberg-table").toString();
+        String tableName = faker.name().firstName().toLowerCase();
+
+        String sparkSqlTableLocation = "local.db." + tableName;
+        String hadoopTableLocation = "spark-warehouse/db/" + tableName;
 
         Schema SCHEMA = new Schema(
                 optional(1, "employeeId", Types.IntegerType.get()),
                 optional(2, "name", Types.StringType.get()),
                 optional(3, "baseSalary", Types.DoubleType.get())
-
         );
 
         HadoopTables tables = new HadoopTables(CONF);
         PartitionSpec spec = PartitionSpec.unpartitioned();
-        Table table = tables.create(SCHEMA, spec, tableLocation);
+        Table table = tables.create(SCHEMA, spec, hadoopTableLocation);
 
         // Generate the first snapshot
         List<SampleThreeFieldRecord> firstBatchRecords = Lists.newArrayList(
@@ -71,7 +74,7 @@ public class IcebergSnapshotVersioningTest {
                 new SampleThreeFieldRecord(3, "Peter", 300000.0)
         );
         Dataset<Row> firstDf = spark.createDataFrame(firstBatchRecords, SampleThreeFieldRecord.class);
-        firstDf.select("employeeId", "name", "baseSalary").write().format("iceberg").mode("append").save(tableLocation);
+        firstDf.select("employeeId", "name", "baseSalary").write().format("iceberg").mode("append").save(hadoopTableLocation);
 
         // Generate the second snapshot
         List<SampleThreeFieldRecord> secondBatchRecords = Lists.newArrayList(
@@ -80,14 +83,14 @@ public class IcebergSnapshotVersioningTest {
                 new SampleThreeFieldRecord(6, "Mark", 350000.0)
         );
         Dataset<Row> secondDf = spark.createDataFrame(secondBatchRecords, SampleThreeFieldRecord.class);
-        secondDf.select("employeeId", "name", "baseSalary").write().format("iceberg").mode("append").save(tableLocation);
+        secondDf.select("employeeId", "name", "baseSalary").write().format("iceberg").mode("append").save(hadoopTableLocation);
 
         Assert.assertEquals("Expected 2 snapshots", 2, Iterables.size(table.snapshots()));
 
         // Verify the records in the current snapshot
         Dataset<Row> currentSnapshotResult = spark.read()
                 .format("iceberg")
-                .load(tableLocation);
+                .load(hadoopTableLocation);
         currentSnapshotResult.show();
 
         List<SampleThreeFieldRecord> currentSnapshotRecords = currentSnapshotResult.orderBy("employeeId")
@@ -104,16 +107,22 @@ public class IcebergSnapshotVersioningTest {
         Dataset<Row> previousSnapshotResult = spark.read()
                 .format("iceberg")
                 .option("snapshot-id", parentSnapshotId)
-                .load(tableLocation);
+                .load(hadoopTableLocation);
         List<SampleThreeFieldRecord> previousSnapshotRecords = previousSnapshotResult.orderBy("employeeId")
                 .as(Encoders.bean(SampleThreeFieldRecord.class))
                 .collectAsList();
         Assert.assertEquals("Previous snapshot rows should match", firstBatchRecords, previousSnapshotRecords);
+
+        // Drop the table
+        spark.sql("DROP TABLE IF EXISTS " + sparkSqlTableLocation);
     }
 
     @Test
     public void testReorderedColumns() throws Exception {
-        String tableLocation = temp.newFolder("reorder_columns").toString();
+        String tableName = faker.name().firstName().toLowerCase();
+
+        String sparkSqlTableLocation = "local.db." + tableName;
+        String hadoopTableLocation = "spark-warehouse/db/" + tableName;
 
         Schema schema = new Schema(
                 optional(1, "studentID", Types.IntegerType.get()),
@@ -123,7 +132,7 @@ public class IcebergSnapshotVersioningTest {
         );
 
         HadoopTables tables = new HadoopTables(spark.sessionState().newHadoopConf());
-        Table table = tables.create(schema, PartitionSpec.unpartitioned(), tableLocation);
+        Table table = tables.create(schema, PartitionSpec.unpartitioned(), hadoopTableLocation);
         table.updateProperties().set("iceberg.snapshot.versioning.enabled", "true").commit();
 
         List<SampleMultipleFieldsRecord> batchRecords = Lists.newArrayList(
@@ -137,12 +146,12 @@ public class IcebergSnapshotVersioningTest {
                 .write()
                 .format("iceberg")
                 .mode("append")
-                .save(tableLocation);
+                .save(hadoopTableLocation);
 
         List<SampleMultipleFieldsRecord> snapshotResult = spark.read()
                 .format("iceberg")
                 .option("snapshot-id", table.currentSnapshot().snapshotId())
-                .load(tableLocation)
+                .load(hadoopTableLocation)
                 .orderBy("course")
                 .as(Encoders.bean(SampleMultipleFieldsRecord.class))
                 .collectAsList();
@@ -152,34 +161,35 @@ public class IcebergSnapshotVersioningTest {
                 .collect(Collectors.toList());
 
         Assert.assertEquals("Expected records should match", expectedRecords, snapshotResult);
+
+        spark.sql("DROP TABLE IF EXISTS " + sparkSqlTableLocation);
     }
 
     @Test
     public void testSnapshotVersionHistory() throws IOException {
-        String tableLocation = temp.newFolder("iceberg-table").toString();
+        String tableName = faker.name().firstName().toLowerCase();
 
+        String sparkSqlTableLocation = "local.db." + tableName;
+        String hadoopTableLocation = "spark-warehouse/db/" + tableName;
         Schema SCHEMA = new Schema(
-            optional(1, "employeeId", Types.IntegerType.get()),
-            optional(2, "name", Types.StringType.get()),
-            optional(3, "baseSalary", Types.DoubleType.get())
+                optional(1, "employeeId", Types.IntegerType.get()),
+                optional(2, "name", Types.StringType.get()),
+                optional(3, "baseSalary", Types.DoubleType.get())
         );
 
         HadoopTables tables = new HadoopTables(CONF);
         PartitionSpec spec = PartitionSpec.unpartitioned();
-        Table table = tables.create(SCHEMA, spec, tableLocation);
+        Table table = tables.create(SCHEMA, spec, hadoopTableLocation);
 
         // Generate 5 snapshots
         for (int i = 0; i < 5; i++) {
-            // Generate random names and salaries
-            Faker faker = new Faker();
-
             List<SampleThreeFieldRecord> batchRecords = new ArrayList<>();
             for (int j = 0; j < faker.number().numberBetween(15, 30); ++j) {
                 batchRecords.add(new SampleThreeFieldRecord(faker.number().randomDigitNotZero(), faker.name().firstName(), faker.number().randomDouble(2, 80000, 200000)));
             }
 
             Dataset<Row> dataFrame = spark.createDataFrame(batchRecords, SampleThreeFieldRecord.class);
-            dataFrame.select("employeeId", "name", "baseSalary").write().format("iceberg").mode("append").save(tableLocation);
+            dataFrame.select("employeeId", "name", "baseSalary").write().format("iceberg").mode("append").save(hadoopTableLocation);
         }
 
         // Verify the number of snapshots
@@ -203,6 +213,9 @@ public class IcebergSnapshotVersioningTest {
 
         // Verify the number of snapshots
         Assert.assertEquals("Expected 3 snapshots", 3, Iterables.size(table.snapshots()));
+
+        Dataset<Row> result = spark.sql("SELECT summary FROM " + sparkSqlTableLocation + ".snapshots");
+        result.show();
     }
 
     private void printSnapshotVersionLinkedList(Table table) {
@@ -219,46 +232,54 @@ public class IcebergSnapshotVersioningTest {
 
     @Test(expected = NullPointerException.class)
     public void snapshotVersioningTraversalViaParentIdTest() throws IOException {
-        String tableLocation = temp.newFolder("iceberg-table").toString();
+        String tableName = faker.name().firstName().toLowerCase();
 
-        Schema SCHEMA = new Schema(
-                optional(1, "employeeId", Types.IntegerType.get()),
-                optional(2, "name", Types.StringType.get()),
-                optional(3, "baseSalary", Types.DoubleType.get())
-        );
+        String sparkSqlTableLocation = "local.db." + tableName;
+        String hadoopTableLocation = "spark-warehouse/db/" + tableName;
 
-        HadoopTables tables = new HadoopTables(CONF);
-        PartitionSpec spec = PartitionSpec.unpartitioned();
-        Table table = tables.create(SCHEMA, spec, tableLocation);
+        try {
+            Schema SCHEMA = new Schema(
+                    optional(1, "employeeId", Types.IntegerType.get()),
+                    optional(2, "name", Types.StringType.get()),
+                    optional(3, "baseSalary", Types.DoubleType.get())
+            );
 
-        // Generate 5 snapshots
-        for (int i = 0; i < 5; i++) {
-            // Generate random names and salaries
-            Faker faker = new Faker();
+            HadoopTables tables = new HadoopTables(CONF);
+            PartitionSpec spec = PartitionSpec.unpartitioned();
+            Table table = tables.create(SCHEMA, spec, hadoopTableLocation);
 
-            List<SampleThreeFieldRecord> batchRecords = new ArrayList<>();
-            for (int j = 0; j < faker.number().numberBetween(15, 30); ++j) {
-                batchRecords.add(new SampleThreeFieldRecord(faker.number().randomDigitNotZero(), faker.name().firstName(), faker.number().randomDouble(2, 80000, 200000)));
+            // Generate 5 snapshots
+            for (int i = 0; i < 5; i++) {
+                // Generate random names and salaries
+
+                List<SampleThreeFieldRecord> batchRecords = new ArrayList<>();
+                for (int j = 0; j < faker.number().numberBetween(15, 30); ++j) {
+                    batchRecords.add(new SampleThreeFieldRecord(faker.number().randomDigitNotZero(), faker.name().firstName(), faker.number().randomDouble(2, 80000, 200000)));
+                }
+
+                Dataset<Row> dataFrame = spark.createDataFrame(batchRecords, SampleThreeFieldRecord.class);
+                dataFrame.select("employeeId", "name", "baseSalary").write().format("iceberg").mode("append").save(hadoopTableLocation);
             }
 
-            Dataset<Row> dataFrame = spark.createDataFrame(batchRecords, SampleThreeFieldRecord.class);
-            dataFrame.select("employeeId", "name", "baseSalary").write().format("iceberg").mode("append").save(tableLocation);
-        }
+            // Print the version history
+            printSnapshotVersionViaParentIdLinkedList(table);
 
-        // Print the version history
-        printSnapshotVersionViaParentIdLinkedList(table);
+            // Expire second and third snapshots
+            int i = 1;
+            for (Snapshot snapshot : table.snapshots()) {
+                if (i == 2 || i == 3) {
+                    table.expireSnapshots().expireSnapshotId(snapshot.snapshotId()).commit();
+                }
 
-        // Expire second and third snapshots
-        int i = 1;
-        for (Snapshot snapshot : table.snapshots()) {
-            if (i == 2 || i == 3) {
-                table.expireSnapshots().expireSnapshotId(snapshot.snapshotId()).commit();
+                i++;
             }
 
-            i++;
+            printSnapshotVersionViaParentIdLinkedList(table);
+        } catch (Exception e) {
+            // Drop the table
+            spark.sql("DROP TABLE IF EXISTS " + sparkSqlTableLocation);
+            throw e;
         }
-
-        printSnapshotVersionViaParentIdLinkedList(table);
     }
 
     private void printSnapshotVersionViaParentIdLinkedList(Table table) {
@@ -280,5 +301,39 @@ public class IcebergSnapshotVersioningTest {
         }
 
         System.out.println("\n****************************************************************************************************************************\n\n\n");
+    }
+
+    @Test
+    public void testSnapshotVersionSql() throws IOException {
+        String tableName = faker.name().firstName().toLowerCase();
+
+        String tableLocation = "local.db." + tableName;
+        String hadoopTableLocation = "spark-warehouse/db/" + tableName;
+
+        Schema SCHEMA = new Schema(
+                optional(1, "employeeId", Types.IntegerType.get()),
+                optional(2, "name", Types.StringType.get()),
+                optional(3, "baseSalary", Types.DoubleType.get())
+        );
+
+        HadoopTables tables = new HadoopTables(CONF);
+
+        List<SampleThreeFieldRecord> batchRecords = new ArrayList<>();
+        for (int j = 0; j < 5; ++j) {
+            batchRecords.add(new SampleThreeFieldRecord(faker.number().randomDigitNotZero(), faker.name().firstName(), faker.number().randomDouble(2, 80000, 200000)));
+        }
+
+        Dataset<Row> dataFrame = spark.createDataFrame(batchRecords, SampleThreeFieldRecord.class);
+
+        dataFrame.writeTo(tableLocation).createOrReplace();
+
+        List<Row> results = spark.sql("SELECT * FROM " + tableLocation).collectAsList();
+
+        Assert.assertEquals("Expected 5 rows", 5, results.size());
+
+        Table table = tables.load(hadoopTableLocation);
+        Assert.assertEquals("Expected 1 snapshot", 1, Iterables.size(table.snapshots()));
+
+        spark.sql("DROP TABLE IF EXISTS " + tableLocation);
     }
 }
