@@ -1,26 +1,28 @@
+import java.io.File;
 import java.io.IOException;
+import java.util.Comparator;
 import java.util.List;
+import java.util.stream.Collectors;
 
+import models.SampleMultipleFieldsRecord;
 import models.SampleThreeFieldRecord;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.iceberg.PartitionSpec;
-import org.apache.iceberg.Schema;
-import org.apache.iceberg.Snapshot;
-import org.apache.iceberg.Table;
+import org.apache.iceberg.*;
 import org.apache.iceberg.hadoop.HadoopTables;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.spark.SparkReadOptions;
+import org.apache.iceberg.spark.SparkWriteOptions;
 import org.apache.iceberg.types.Types;
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Encoders;
-import org.apache.spark.sql.Row;
-import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.*;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+
+import javax.xml.crypto.Data;
 
 import static org.apache.iceberg.types.Types.NestedField.optional;
 
@@ -104,5 +106,48 @@ public class IcebergSnapshotVersioningTest {
                 .as(Encoders.bean(SampleThreeFieldRecord.class))
                 .collectAsList();
         Assert.assertEquals("Previous snapshot rows should match", firstBatchRecords, previousSnapshotRecords);
+    }
+
+    @Test
+    public void testReorderedColumns() throws Exception {
+        String tableLocation = temp.newFolder("reorder_columns").toString();
+
+        Schema schema = new Schema(
+                optional(1, "studentID", Types.IntegerType.get()),
+                optional(2, "name", Types.StringType.get()),
+                optional(3, "course", Types.StringType.get()),
+                optional(4, "gpa", Types.DoubleType.get())
+        );
+
+        HadoopTables tables = new HadoopTables(spark.sessionState().newHadoopConf());
+        Table table = tables.create(schema, PartitionSpec.unpartitioned(), tableLocation);
+        table.updateProperties().set("iceberg.snapshot.versioning.enabled", "true").commit();
+        
+        List<SampleMultipleFieldsRecord> batchRecords = Lists.newArrayList(
+                new SampleMultipleFieldsRecord(1, "Sam", "Math", 3.78),
+                new SampleMultipleFieldsRecord(2, "John", "Physiology", 3.50),
+                new SampleMultipleFieldsRecord(3, "Peter", "Arts", 3.8)
+        );
+        Dataset<Row> dataFrame = spark.createDataFrame(batchRecords, SampleMultipleFieldsRecord.class);
+
+        dataFrame.select("studentID", "name", "course", "gpa")
+                .write()
+                .format("iceberg")
+                .mode("append")
+                .save(tableLocation);
+
+        List<SampleMultipleFieldsRecord> snapshotResult = spark.read()
+                .format("iceberg")
+                .option("snapshot-id", table.currentSnapshot().snapshotId())
+                .load(tableLocation)
+                .orderBy("course")
+                .as(Encoders.bean(SampleMultipleFieldsRecord.class))
+                .collectAsList();
+
+        List<SampleMultipleFieldsRecord> expectedRecords = batchRecords.stream()
+                .sorted(Comparator.comparing(SampleMultipleFieldsRecord::getCourse))
+                .collect(Collectors.toList());
+
+        Assert.assertEquals("Expected records should match", expectedRecords, snapshotResult);
     }
 }
