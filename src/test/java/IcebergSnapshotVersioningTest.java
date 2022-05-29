@@ -1,9 +1,11 @@
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import com.github.javafaker.Faker;
 import models.SampleMultipleFieldsRecord;
 import models.SampleThreeFieldRecord;
 import org.apache.hadoop.conf.Configuration;
@@ -122,7 +124,7 @@ public class IcebergSnapshotVersioningTest {
         HadoopTables tables = new HadoopTables(spark.sessionState().newHadoopConf());
         Table table = tables.create(schema, PartitionSpec.unpartitioned(), tableLocation);
         table.updateProperties().set("iceberg.snapshot.versioning.enabled", "true").commit();
-        
+
         List<SampleMultipleFieldsRecord> batchRecords = Lists.newArrayList(
                 new SampleMultipleFieldsRecord(1, "Sam", "Math", 3.78),
                 new SampleMultipleFieldsRecord(2, "John", "Physiology", 3.50),
@@ -149,5 +151,37 @@ public class IcebergSnapshotVersioningTest {
                 .collect(Collectors.toList());
 
         Assert.assertEquals("Expected records should match", expectedRecords, snapshotResult);
+    }
+
+    @Test
+    public void testSnapshotVersionHistory() throws IOException {
+        String tableLocation = temp.newFolder("iceberg-table").toString();
+
+        Schema SCHEMA = new Schema(
+            optional(1, "employeeId", Types.IntegerType.get()),
+            optional(2, "name", Types.StringType.get()),
+            optional(3, "baseSalary", Types.DoubleType.get())
+        );
+
+        HadoopTables tables = new HadoopTables(CONF);
+        PartitionSpec spec = PartitionSpec.unpartitioned();
+        Table table = tables.create(SCHEMA, spec, tableLocation);
+
+        // Generate 5 snapshots
+        for (int i = 0; i < 5; i++) {
+            // Generate random names and salaries
+            Faker faker = new Faker();
+
+            List<SampleThreeFieldRecord> batchRecords = new ArrayList<>();
+            for (int j = 0; j < faker.number().numberBetween(15, 30); ++j) {
+                batchRecords.add(new SampleThreeFieldRecord(faker.number().randomDigitNotZero(), faker.name().firstName(), faker.number().randomDouble(2, 80000, 200000)));
+            }
+
+            Dataset<Row> dataFrame = spark.createDataFrame(batchRecords, SampleThreeFieldRecord.class);
+            dataFrame.select("employeeId", "name", "baseSalary").write().format("iceberg").mode("append").save(tableLocation);
+        }
+
+        // Verify the number of snapshots
+        Assert.assertEquals("Expected 5 snapshots", 5, Iterables.size(table.snapshots()));
     }
 }
