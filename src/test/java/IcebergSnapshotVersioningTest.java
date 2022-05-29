@@ -216,6 +216,8 @@ public class IcebergSnapshotVersioningTest {
 
         Dataset<Row> result = spark.sql("SELECT summary FROM " + sparkSqlTableLocation + ".snapshots");
         result.show();
+
+        spark.sql("DROP TABLE IF EXISTS " + sparkSqlTableLocation);
     }
 
     private void printSnapshotVersionLinkedList(Table table) {
