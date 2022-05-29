@@ -2,6 +2,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -183,5 +184,101 @@ public class IcebergSnapshotVersioningTest {
 
         // Verify the number of snapshots
         Assert.assertEquals("Expected 5 snapshots", 5, Iterables.size(table.snapshots()));
+
+        // Print the version history
+        printSnapshotVersionLinkedList(table);
+
+        // Expire second and third snapshots
+
+        int i = 1;
+        for (Snapshot snapshot : table.snapshots()) {
+            if (i == 2 || i == 3) {
+                table.expireSnapshots().expireSnapshotId(snapshot.snapshotId()).commit();
+            }
+
+            i++;
+        }
+
+        printSnapshotVersionLinkedList(table);
+
+        // Verify the number of snapshots
+        Assert.assertEquals("Expected 3 snapshots", 3, Iterables.size(table.snapshots()));
+    }
+
+    private void printSnapshotVersionLinkedList(Table table) {
+        System.out.println("\n\n\n****************************************************************************************************************************");
+
+        // Print the version history
+        for (Snapshot snapshot : table.snapshots()) {
+            System.out.print(snapshot.snapshotId() + " -> ");
+        }
+
+        System.out.println("\n****************************************************************************************************************************\n\n\n");
+        System.out.println();
+    }
+
+    @Test(expected = NullPointerException.class)
+    public void snapshotVersioningTraversalViaParentIdTest() throws IOException {
+        String tableLocation = temp.newFolder("iceberg-table").toString();
+
+        Schema SCHEMA = new Schema(
+                optional(1, "employeeId", Types.IntegerType.get()),
+                optional(2, "name", Types.StringType.get()),
+                optional(3, "baseSalary", Types.DoubleType.get())
+        );
+
+        HadoopTables tables = new HadoopTables(CONF);
+        PartitionSpec spec = PartitionSpec.unpartitioned();
+        Table table = tables.create(SCHEMA, spec, tableLocation);
+
+        // Generate 5 snapshots
+        for (int i = 0; i < 5; i++) {
+            // Generate random names and salaries
+            Faker faker = new Faker();
+
+            List<SampleThreeFieldRecord> batchRecords = new ArrayList<>();
+            for (int j = 0; j < faker.number().numberBetween(15, 30); ++j) {
+                batchRecords.add(new SampleThreeFieldRecord(faker.number().randomDigitNotZero(), faker.name().firstName(), faker.number().randomDouble(2, 80000, 200000)));
+            }
+
+            Dataset<Row> dataFrame = spark.createDataFrame(batchRecords, SampleThreeFieldRecord.class);
+            dataFrame.select("employeeId", "name", "baseSalary").write().format("iceberg").mode("append").save(tableLocation);
+        }
+
+        // Print the version history
+        printSnapshotVersionViaParentIdLinkedList(table);
+
+        // Expire second and third snapshots
+        int i = 1;
+        for (Snapshot snapshot : table.snapshots()) {
+            if (i == 2 || i == 3) {
+                table.expireSnapshots().expireSnapshotId(snapshot.snapshotId()).commit();
+            }
+
+            i++;
+        }
+
+        printSnapshotVersionViaParentIdLinkedList(table);
+    }
+
+    private void printSnapshotVersionViaParentIdLinkedList(Table table) {
+        Snapshot currentSnapshot = table.currentSnapshot();
+        LinkedList<Long> snapshotIdVersions = new LinkedList<>();
+
+        while (currentSnapshot.parentId() != null) {
+            snapshotIdVersions.addFirst(currentSnapshot.snapshotId());
+            currentSnapshot = table.snapshot(currentSnapshot.parentId());
+        }
+
+        snapshotIdVersions.addFirst(currentSnapshot.snapshotId());
+
+        System.out.println("\n\n\n****************************************************************************************************************************");
+
+        // Print the version history
+        for (Long snapshotId : snapshotIdVersions) {
+            System.out.print(snapshotId + " -> ");
+        }
+
+        System.out.println("\n****************************************************************************************************************************\n\n\n");
     }
 }
