@@ -4,7 +4,6 @@ import java.util.Comparator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.stream.Collectors;
-
 import com.github.javafaker.Faker;
 import models.SampleMultipleFieldsRecord;
 import models.SampleThreeFieldRecord;
@@ -17,8 +16,6 @@ import org.apache.iceberg.types.Types;
 import org.apache.spark.SparkConf;
 import org.apache.spark.sql.*;
 import org.junit.*;
-
-import static org.apache.iceberg.types.Types.NestedField.optional;
 
 public class IcebergSnapshotVersioningTest {
     private static final Configuration CONF = new Configuration();
@@ -58,9 +55,9 @@ public class IcebergSnapshotVersioningTest {
         String hadoopTableLocation = "spark-warehouse/db/" + tableName;
 
         Schema SCHEMA = new Schema(
-                optional(1, "employeeId", Types.IntegerType.get()),
-                optional(2, "name", Types.StringType.get()),
-                optional(3, "baseSalary", Types.DoubleType.get())
+                Types.NestedField.optional(1, "employeeId", Types.IntegerType.get()),
+                Types.NestedField.optional(2, "name", Types.StringType.get()),
+                Types.NestedField.optional(3, "baseSalary", Types.DoubleType.get())
         );
 
         HadoopTables tables = new HadoopTables(CONF);
@@ -125,10 +122,10 @@ public class IcebergSnapshotVersioningTest {
         String hadoopTableLocation = "spark-warehouse/db/" + tableName;
 
         Schema schema = new Schema(
-                optional(1, "studentID", Types.IntegerType.get()),
-                optional(2, "name", Types.StringType.get()),
-                optional(3, "course", Types.StringType.get()),
-                optional(4, "gpa", Types.DoubleType.get())
+                Types.NestedField.optional(1, "studentID", Types.IntegerType.get()),
+                Types.NestedField.optional(2, "name", Types.StringType.get()),
+                Types.NestedField.optional(3, "course", Types.StringType.get()),
+                Types.NestedField.optional(4, "gpa", Types.DoubleType.get())
         );
 
         HadoopTables tables = new HadoopTables(spark.sessionState().newHadoopConf());
@@ -172,9 +169,9 @@ public class IcebergSnapshotVersioningTest {
         String sparkSqlTableLocation = "local.db." + tableName;
         String hadoopTableLocation = "spark-warehouse/db/" + tableName;
         Schema SCHEMA = new Schema(
-                optional(1, "employeeId", Types.IntegerType.get()),
-                optional(2, "name", Types.StringType.get()),
-                optional(3, "baseSalary", Types.DoubleType.get())
+                Types.NestedField.optional(1, "employeeId", Types.IntegerType.get()),
+                Types.NestedField.optional(2, "name", Types.StringType.get()),
+                Types.NestedField.optional(3, "baseSalary", Types.DoubleType.get())
         );
 
         HadoopTables tables = new HadoopTables(CONF);
@@ -241,9 +238,9 @@ public class IcebergSnapshotVersioningTest {
 
         try {
             Schema SCHEMA = new Schema(
-                    optional(1, "employeeId", Types.IntegerType.get()),
-                    optional(2, "name", Types.StringType.get()),
-                    optional(3, "baseSalary", Types.DoubleType.get())
+                    Types.NestedField.optional(1, "employeeId", Types.IntegerType.get()),
+                    Types.NestedField.optional(2, "name", Types.StringType.get()),
+                    Types.NestedField.optional(3, "baseSalary", Types.DoubleType.get())
             );
 
             HadoopTables tables = new HadoopTables(CONF);
@@ -309,13 +306,13 @@ public class IcebergSnapshotVersioningTest {
     public void testSnapshotVersionSql() throws IOException {
         String tableName = faker.name().firstName().toLowerCase();
 
-        String tableLocation = "local.db." + tableName;
+        String sparkSqlTableLocation = "local.db." + tableName;
         String hadoopTableLocation = "spark-warehouse/db/" + tableName;
 
         Schema SCHEMA = new Schema(
-                optional(1, "employeeId", Types.IntegerType.get()),
-                optional(2, "name", Types.StringType.get()),
-                optional(3, "baseSalary", Types.DoubleType.get())
+                Types.NestedField.optional(1, "employeeId", Types.IntegerType.get()),
+                Types.NestedField.optional(2, "name", Types.StringType.get()),
+                Types.NestedField.optional(3, "baseSalary", Types.DoubleType.get())
         );
 
         HadoopTables tables = new HadoopTables(CONF);
@@ -327,15 +324,75 @@ public class IcebergSnapshotVersioningTest {
 
         Dataset<Row> dataFrame = spark.createDataFrame(batchRecords, SampleThreeFieldRecord.class);
 
-        dataFrame.writeTo(tableLocation).createOrReplace();
+        dataFrame.writeTo(sparkSqlTableLocation).createOrReplace();
 
-        List<Row> results = spark.sql("SELECT * FROM " + tableLocation).collectAsList();
+        List<Row> results = spark.sql("SELECT * FROM " + sparkSqlTableLocation).collectAsList();
 
         Assert.assertEquals("Expected 5 rows", 5, results.size());
 
         Table table = tables.load(hadoopTableLocation);
         Assert.assertEquals("Expected 1 snapshot", 1, Iterables.size(table.snapshots()));
 
-        spark.sql("DROP TABLE IF EXISTS " + tableLocation);
+        spark.sql("DROP TABLE IF EXISTS " + sparkSqlTableLocation);
+    }
+
+    @Test
+    public void testSetCurrentSnapshotToParentSnapshot() {
+        String tableName = faker.name().firstName().toLowerCase();
+
+        String sparkSqlTableLocation = "local.db." + tableName;
+        String hadoopTableLocation = "spark-warehouse/db/" + tableName;
+
+        Schema SCHEMA = new Schema(
+                Types.NestedField.optional(1, "employeeId", Types.IntegerType.get()),
+                Types.NestedField.optional(2, "name", Types.StringType.get()),
+                Types.NestedField.optional(3, "baseSalary", Types.DoubleType.get())
+        );
+
+        PartitionSpec SPEC = PartitionSpec.builderFor(SCHEMA)
+                .bucket("employeeId", 4)
+                .build();
+
+        int numRecords = 10;
+        List<SampleThreeFieldRecord> batchRecords = Lists.newArrayList(
+                new SampleThreeFieldRecord(1, "Sam", 100000.0),
+                new SampleThreeFieldRecord(2, "John", 200000.0),
+                new SampleThreeFieldRecord(3, "Peter", 300000.0),
+                new SampleThreeFieldRecord(4, "Bob", 150000.0),
+                new SampleThreeFieldRecord(5, "David", 120000.0)
+        );
+
+        HadoopTables tables = new HadoopTables(CONF);
+        Dataset<Row> dataFrame = spark.createDataFrame(batchRecords, SampleThreeFieldRecord.class);
+
+        dataFrame.writeTo(sparkSqlTableLocation).createOrReplace();
+
+        List<Row> sparkSqlResult1 = spark.sql("SELECT * FROM " + sparkSqlTableLocation).collectAsList();
+        Assert.assertEquals("Expected 5 rows", 5, sparkSqlResult1.size());
+
+        // Delete from the table where baseSalary > 180000
+        spark.sql("DELETE FROM " + sparkSqlTableLocation + " WHERE baseSalary > 180000").show();
+
+        List<Row> sparkSqlResult2 = spark.sql("SELECT * FROM " + sparkSqlTableLocation).collectAsList();
+        Assert.assertEquals("Expected 3 rows", 3, sparkSqlResult2.size());
+
+        Table table = tables.load(hadoopTableLocation);
+
+        // Set current snapshot to the parent of the current snapshot
+        table.manageSnapshots().setCurrentSnapshot(table.currentSnapshot().parentId()).commit();
+
+        Dataset<Row> currentSnapshotResult = spark.read()
+                .format("iceberg")
+                .load(hadoopTableLocation);
+
+        // Now the current snapshot spark.read() should return 5 rows
+        Assert.assertEquals("Expected 5 rows", 5, currentSnapshotResult.count());
+
+        // However, Spark sql results still have 3 rows even though the current snapshot has 5 rows.
+        List<Row> sparkSqlResult3 = spark.sql("SELECT * FROM " + sparkSqlTableLocation).collectAsList();
+        Assert.assertEquals("Expected 3 rows", 3, sparkSqlResult3.size());
+
+        // Drop the table in the end
+        spark.sql("DROP TABLE IF EXISTS " + sparkSqlTableLocation);
     }
 }
