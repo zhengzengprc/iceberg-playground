@@ -9,15 +9,20 @@ import models.SampleMultipleFieldsRecord;
 import models.SampleThreeFieldRecord;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.*;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.hadoop.HadoopTables;
+import org.apache.iceberg.spark.actions.SparkActions;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Types;
 import org.apache.spark.SparkConf;
 import org.apache.spark.sql.*;
 import org.junit.*;
+import org.apache.log4j.Logger;
+import org.apache.log4j.Level;
 
 public class IcebergSnapshotVersioningTest {
+
     private static final Configuration CONF = new Configuration();
 
     private static SparkSession spark = null;
@@ -26,6 +31,8 @@ public class IcebergSnapshotVersioningTest {
 
     @BeforeClass
     public static void startSpark() {
+        Logger.getLogger("org").setLevel(Level.OFF);
+        Logger.getLogger("akka").setLevel(Level.OFF);
         SparkConf sparkConf = getSparkConfig();
         IcebergSnapshotVersioningTest.spark = SparkSession.builder().master("local[2]").config(sparkConf).getOrCreate();
     }
@@ -395,4 +402,134 @@ public class IcebergSnapshotVersioningTest {
         // Drop the table in the end
         spark.sql("DROP TABLE IF EXISTS " + sparkSqlTableLocation);
     }
+
+    @Test
+    public void testExpireMultipleVersionsOfSnapshots() throws IOException {
+        String tableName = faker.name().firstName().toLowerCase();
+
+        String sparkSqlTableLocation = "local.db." + tableName;
+        String hadoopTableLocation = "spark-warehouse/db/" + tableName;
+
+        Schema SCHEMA = new Schema(
+                Types.NestedField.optional(1, "employeeId", Types.IntegerType.get()),
+                Types.NestedField.optional(2, "name", Types.StringType.get()),
+                Types.NestedField.optional(3, "baseSalary", Types.DoubleType.get())
+        );
+
+        HadoopTables tables = new HadoopTables(CONF);
+        PartitionSpec spec = PartitionSpec.unpartitioned();
+        Table table = tables.create(SCHEMA, spec, hadoopTableLocation);
+
+        // Assert there are no snapshots
+        Assert.assertEquals("Expected 0 snapshots", 0, Iterables.size(table.snapshots()));
+
+        // Create 10 snapshots
+        try{
+            for (int i = 1; i <= 10; ++i) {
+                // Generate random names and salaries
+
+                List<SampleThreeFieldRecord> batchRecords = Lists.newArrayList(
+                    new SampleThreeFieldRecord(i, faker.name().firstName(), i * 10000.0)
+                );
+
+                Dataset<Row> dataFrame = spark.createDataFrame(batchRecords, SampleThreeFieldRecord.class);
+                dataFrame.select("employeeId", "name", "baseSalary").write().format("iceberg").mode("append").save(hadoopTableLocation);
+            }
+
+            table.refresh();
+            // Assert that there are 10 snapshots
+            Assert.assertEquals("Expected 10 snapshots", 10, Iterables.size(table.snapshots()));
+
+            Dataset<Row> dataFrame1 = spark.read().format("iceberg").load(hadoopTableLocation);
+            dataFrame1.show();
+
+            // Expire all snapshots except 2nd, 9th and 10th
+            int i = 1;
+            for (Snapshot snapshot : table.snapshots()) {
+                if (i == 2 || i == 9 || i == 10) {
+                    ++i;
+                    continue;
+                }
+
+                // table.expireSnapshots().expireSnapshotId(snapshot.snapshotId()).commit();
+                SparkActions.get().expireSnapshots(table).expireSnapshotId(snapshot.snapshotId()).execute();
+                ++i;
+            }
+
+            long tenthSnapshot = table.currentSnapshot().snapshotId();
+
+            Assert.assertEquals("Expected 3 snapshots", 3, Iterables.size(table.snapshots()));
+
+            printSnapshotVersionLinkedList(table);
+
+            Dataset<Row> dataFrame2 = spark.read().format("iceberg").load(hadoopTableLocation);
+            dataFrame2.show();
+
+            // Set the current snapshot to the 2nd Snapshot
+            long secondSnapShotId = table.snapshots().iterator().next().snapshotId();
+            System.out.println("Second snapshot id: " + secondSnapShotId);
+
+            table.manageSnapshots().setCurrentSnapshot(secondSnapShotId).commit();
+
+            Assert.assertEquals("Current Snapshot Id should be  + " + secondSnapShotId, table.currentSnapshot().snapshotId(), secondSnapShotId);
+
+            Dataset<Row> dataFrame3 = spark.read().format("iceberg").load(hadoopTableLocation);
+            dataFrame3.show();
+
+            // table.newDelete().deleteFromRowFilter(Expressions.lessThan("baseSalary", 25000.0)).commit();
+            spark.sql("DELETE FROM " + sparkSqlTableLocation + " WHERE baseSalary > 15000.0").show();
+
+            table.refresh();
+            printSnapshotVersionLinkedList(table);
+
+            System.out.println("Current snapshot id after delete: " + table.currentSnapshot().snapshotId());
+
+            Dataset<Row> dataFrame4 = spark.read().format("iceberg").load(hadoopTableLocation);
+            dataFrame4.show();
+
+            // Get All snapshot ids
+            List<Long> snapshotIds = Lists.newArrayList();
+            System.out.println("Snapshot Ids and Parent Ids");
+            for (Snapshot snapshot : table.snapshots()) {
+                System.out.println("Snapshot Id: " + snapshot.snapshotId() + " Parent Id: " + snapshot.parentId());
+                snapshotIds.add(snapshot.snapshotId());
+            }
+
+            // Print data from each snapshots
+            for (long snapshotId : snapshotIds) {
+                table.manageSnapshots().setCurrentSnapshot(snapshotId).commit();
+                System.out.println("Data From Snapshot: " + snapshotId);
+                spark.read().format("iceberg").load(hadoopTableLocation).show();
+                System.out.println("**********************************************************\n\n");
+            }
+
+            // Print current snapshot data
+            table.manageSnapshots().setCurrentSnapshot(tenthSnapshot).commit();
+
+            spark.sql("SELECT * FROM " + sparkSqlTableLocation).show();
+
+            /*
+            List<SampleThreeFieldRecord> batchRecords = new ArrayList<>();
+            for (int j = 0; j < faker.number().numberBetween(20, 35); ++j) {
+                batchRecords.add(new SampleThreeFieldRecord(faker.number().randomDigitNotZero(), faker.name().firstName(), faker.number().randomDouble(2, 80000, 200000)));
+            }
+
+            Dataset<Row> dataFrame = spark.createDataFrame(batchRecords, SampleThreeFieldRecord.class);
+
+            dataFrame.write().parquet("/tmp/"+ faker.file().fileName() +".parquet");
+
+            DataFile dataFile = DataFiles.builder(table.spec())
+                    .withPath("/tmp/test_expire_multiple_versions_of_snapshots.parquet")
+                    .withFileSizeInBytes(10)
+                    .withRecordCount(2)
+                    .build();
+
+            printSnapshotVersionLinkedList(table);
+            */
+        } finally {
+            // Drop the table
+            spark.sql("DROP TABLE IF EXISTS " + sparkSqlTableLocation);
+        }
+    }
+
 }
