@@ -5,8 +5,10 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.stream.Collectors;
 import com.github.javafaker.Faker;
+import models.Orders;
 import models.SampleMultipleFieldsRecord;
 import models.SampleThreeFieldRecord;
+import models.User;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.*;
 import org.apache.iceberg.expressions.Expressions;
@@ -508,6 +510,14 @@ public class IcebergSnapshotVersioningTest {
 
             spark.sql("SELECT * FROM " + sparkSqlTableLocation).show();
 
+            //Expire the parent of the current snapshot
+
+            SparkActions.get().expireSnapshots(table).expireSnapshotId(secondSnapShotId).execute();
+
+            printSnapshotVersionLinkedList(table);
+
+            spark.sql("SELECT * FROM " + sparkSqlTableLocation).show();
+
             /*
             List<SampleThreeFieldRecord> batchRecords = new ArrayList<>();
             for (int j = 0; j < faker.number().numberBetween(20, 35); ++j) {
@@ -528,8 +538,84 @@ public class IcebergSnapshotVersioningTest {
             */
         } finally {
             // Drop the table
-            spark.sql("DROP TABLE IF EXISTS " + sparkSqlTableLocation);
+            // spark.sql("DROP TABLE IF EXISTS " + sparkSqlTableLocation);
         }
     }
 
+    @Test
+    public void TestSnapshotIsCreatedToATable() {
+        String userTableSparkSqlLocation = "local.db.user";
+        String userTableHadoopLocation = "spark-warehouse/db/user";
+
+        String ordersTableSparkSqlLocation = "local.db";
+        String ordersTableHadoopLocation = "spark-warehouse/db/orders";
+
+        Schema UserSchema = new Schema(
+                Types.NestedField.optional(1, "userId", Types.StringType.get()),
+                Types.NestedField.optional(2, "firstName", Types.StringType.get()),
+                Types.NestedField.optional(3, "lastName", Types.StringType.get())
+        );
+
+        Schema OrderSchema = new Schema(
+                Types.NestedField.optional(1, "orderId", Types.StringType.get()),
+                Types.NestedField.optional(2, "userId", Types.StringType.get())
+        );
+
+        HadoopTables tables = new HadoopTables(CONF);
+        PartitionSpec partitionSpec = PartitionSpec.unpartitioned();
+
+        Table userTable = tables.create(UserSchema, partitionSpec, userTableHadoopLocation);
+        Table ordersTable = tables.create(OrderSchema, partitionSpec, ordersTableHadoopLocation);
+
+
+        List<User> userRecords = Lists.newArrayList(
+                new User("John", "Doe", "johndoe"),
+                new User("Jane", "Smith", "janesmith"),
+                new User("Joe", "Bloggs", "joebloggs")
+        );
+
+        Dataset<Row> userDataFrame = spark.createDataFrame(userRecords, User.class);
+
+        userDataFrame.select("userId", "firstName", "lastName")
+                .write()
+                .format("iceberg")
+                .mode("append")
+                .save(userTableHadoopLocation);
+
+        List<Orders> orderRecords = Lists.newArrayList(
+                new Orders("order1", "johndoe"),
+                new Orders("order2", "janesmith"),
+                new Orders("order3", "joebloggs"),
+                new Orders("order4", "johndoe"),
+                new Orders("order5", "johndoe")
+        );
+
+        Dataset<Row> orderDataFrame = spark.createDataFrame(orderRecords, Orders.class);
+
+        orderDataFrame.select("orderId", "userId")
+                .write()
+                .format("iceberg")
+                .mode("append")
+                .save(ordersTableHadoopLocation);
+
+        // Showing Users and Orders table
+        spark.read().format("iceberg").load(userTableHadoopLocation).show();
+        spark.read().format("iceberg").load(ordersTableHadoopLocation).show();
+
+        // Delete from user table and orders table where userId = "johndoe"
+        /*String DeleteSqlStatement = "DELETE " + userTableSparkSqlLocation + ", " + ordersTableSparkSqlLocation +
+                " FROM " + userTableSparkSqlLocation + " INNER JOIN " + ordersTableSparkSqlLocation +
+                " ON " + userTableSparkSqlLocation + ".userId = " + ordersTableSparkSqlLocation + ".userId " +
+                "WHERE local.db.users.userId = \"johndoe\"";*/
+
+        // Delete from user table and orders table where userId = "johndoe"
+        spark.sql("DELETE FROM " + userTableSparkSqlLocation + " WHERE userId = \"johndoe\"");
+        spark.sql("DELETE FROM " + ordersTableSparkSqlLocation + " WHERE userId = \"johndoe\"");
+
+        // Showing Users and Orders table after delete
+        System.out.println("Show Users and Orders table after delete");
+
+        spark.read().format("iceberg").load(userTableHadoopLocation).show();
+        spark.read().format("iceberg").load(ordersTableHadoopLocation).show();
+    }
 }
