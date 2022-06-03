@@ -543,11 +543,11 @@ public class IcebergSnapshotVersioningTest {
     }
 
     @Test
-    public void TestSnapshotIsCreatedToATable() {
+    public void snapshotIsCreatedToATableTest() {
         String userTableSparkSqlLocation = "local.db.user";
         String userTableHadoopLocation = "spark-warehouse/db/user";
 
-        String ordersTableSparkSqlLocation = "local.db";
+        String ordersTableSparkSqlLocation = "local.db.orders";
         String ordersTableHadoopLocation = "spark-warehouse/db/orders";
 
         Schema UserSchema = new Schema(
@@ -617,5 +617,8 @@ public class IcebergSnapshotVersioningTest {
 
         spark.read().format("iceberg").load(userTableHadoopLocation).show();
         spark.read().format("iceberg").load(ordersTableHadoopLocation).show();
+
+        spark.sql("DROP TABLE IF EXISTS " + userTableSparkSqlLocation);
+        spark.sql("DROP TABLE IF EXISTS " + ordersTableSparkSqlLocation);
     }
 }
